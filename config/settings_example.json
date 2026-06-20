@@ -1,5 +1,5 @@
 {
     "assistant_name": "Anime Assistant",
     "model": "deepseek-chat",
-    "api_key": "sk-2cdee19fc896455e848aae86816de979"
+    "api_key": "YOUR_API_KEY_HERE"
 }
