@@ -1,2 +1,13 @@
-def say_hello():
-    print("Hello, I'm your Anime Assistant!")
+from openai import OpenAI
+def chat_with_ai(message, api_key, model):
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.deepseek.com"
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "user", "content": message}
+        ]
+    )
+    return response.choices[0].message.content

@@ -1,21 +1,31 @@
-# 这是一个示例 Python 脚本。
-
-# 按 Shift+F10 执行或将其替换为您的代码。
-# 按 双击 Shift 在所有地方搜索类、文件、工具窗口、操作和设置。
 from config_loader import load_config
-from ai.chat import say_hello
+from ai.chat import chat_with_ai
+
+
 def main():
     config = load_config()
+
     print("Anime Assistant Started")
     print(f"Anime {config['assistant_name']} starting...")
-    say_hello()
+    print("输入 exit 退出聊天\n")
 
-def print_hi(name):
-    # 在下面的代码行中使用断点来调试脚本。
-    print('Hi, {name}')  # 按 Ctrl+F8 切换断点。
+    while True:
 
+        user_message = input("You: ")
 
-# 按装订区域中的绿色按钮以运行脚本。
+        if user_message.lower() == "exit":
+            print("Goodbye!")
+            break
+
+        reply = chat_with_ai(
+            user_message,
+            config['api_key'],
+            config['model']
+        )
+
+        print("\nAnime Assistant:")
+        print(reply)
+        print()
+
 if __name__ == '__main__':
     main()
-# 访问 https://www.jetbrains.com/help/pycharm/ 获取 PyCharm 帮助
