@@ -1,7 +1,7 @@
 from config_loader import load_config
 from ai.chat import chat_with_ai
 from memory_manager import load_memory, save_memory
-
+from emotion_manager import load_emotion, save_emotion, update_emotion
 def main():
     config = load_config()
     conversation_history = load_memory()
@@ -10,11 +10,13 @@ def main():
     print("输入 exit 退出聊天\n")
 
     while True:
-
+        emotion = load_emotion()
         user_message = input("You: ")
         if user_message.lower() == "exit":
             print("Exiting chat...")
             break
+        emotion = update_emotion(emotion, user_message)
+        save_emotion(emotion)
         conversation_history.append(
     {
         "role": "user",
@@ -27,7 +29,8 @@ def main():
         reply = chat_with_ai(
             conversation_history,
             config['api_key'],
-            config['model']
+            config['model'],
+            emotion
         )
         conversation_history.append(
     {
