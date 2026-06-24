@@ -1,14 +1,38 @@
 import json
+def is_valid_memory(text):
+
+    INVALID_WORDS = [
+        "什么",
+        "吗",
+        "呢",
+        "呀",
+        "啊",
+        "啥"
+        "?",
+        "？"
+    ]
+
+    if len(text) < 2:
+        return False
+
+    if any(word in text for word in INVALID_WORDS):
+        return False
+
+    return True
 
 def update_profile(profile, user_message):
 
     # 我叫什么
     if user_message.startswith("我叫"):
-        profile["name"] = (
+        
+        name = (
             user_message
             .replace("我叫", "")
             .strip()
         )
+
+        if is_valid_memory(name) and name not in profile["names"]:
+            profile["name"] = name
 
     # 我喜欢什么
     elif user_message.startswith("我喜欢"):
@@ -18,7 +42,7 @@ def update_profile(profile, user_message):
             .strip()
         )
 
-        if like not in profile["likes"]:
+        if is_valid_memory(like) and like not in profile["likes"]:
             profile["likes"].append(like)
 
     # 我讨厌什么
@@ -29,17 +53,20 @@ def update_profile(profile, user_message):
             .strip()
         )
 
-        if dislike not in profile["dislikes"]:
+        if is_valid_memory(dislike) and dislike not in profile["dislikes"]:
             profile["dislikes"].append(dislike)
 
     # 昵称
     elif user_message.startswith("你可以叫我"):
-        profile["nickname"] = (
+        nickname = (
             user_message
             .replace("你可以叫我", "")
             .strip()
         )
 
+        if is_valid_memory(nickname) and nickname not in profile["nicknames"]:
+            profile["nickname"] = nickname
+            profile["nicknames"].append(nickname)
     return profile
 def load_profile():
     with open(
