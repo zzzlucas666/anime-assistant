@@ -1,3 +1,8 @@
+"""Anime Assistant main module"""
+from relationship_behavior import build_relationship_hint
+from event_manager import extract_event, save_event
+from behavior_engine import build_behavior_profile
+from context_manager import ContextManager
 from profile_extractor import extract_profile_info
 from router import handle_intent
 from intent_manager import detect_intent
@@ -7,6 +12,8 @@ from memory_manager import load_memory, save_memory
 from emotion_manager import load_emotion, save_emotion, update_emotion
 from profile_manager import load_profile, save_profile, update_profile
 import re
+import json
+from relationship_manager import load_relationship, save_relationship, update_relationship
 def clean_reply(reply):
     reply = re.sub(r'（.*?）', '', reply)
     return reply.strip()
@@ -15,12 +22,9 @@ def main():
     conversation_history = load_memory()
     emotion = load_emotion()
     profile = load_profile()
-    greeting = generate_greeting(
-        config['api_key'],
-        config['model'],
-        emotion,
-        profile
-    )
+    relationship = load_relationship()
+    context = ContextManager(config, emotion, profile, relationship)
+    greeting = generate_greeting(context.get_context())
     print("Anime Assistant Started")
     print(f"Anime {config['assistant_name']} starting...")
     print("输入 exit 退出聊天\n")
@@ -80,28 +84,21 @@ def main():
 
         reply = chat_with_ai(
             conversation_history,
-            config['api_key'],
-            config['model'],
-            emotion,
-            profile
+            context.get_context()
         )
-
         if not reply:
             reply = ""
-
         reply = clean_reply(reply)
-
-        conversation_history.append(
-            {
-                "role": "assistant",
-                "content": reply
-            }
-        )
-
+        event = extract_event(clean_message, reply)
+        save_event(event)
+        update_relationship(relationship, event)
+        save_relationship(relationship)
+        conversation_history.append({"role": "assistant", "content": reply})
         save_memory(conversation_history)
-
+        context.update(emotion, profile, relationship)
         print("\nMio:")
         print(reply)
         print()
+        save_relationship(relationship)
 if __name__ == '__main__':
     main()

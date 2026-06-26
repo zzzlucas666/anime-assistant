@@ -1,0 +1,20 @@
+[
+    {
+        "event": "用户在确认我是否也喜欢：你喜欢oasic吗",
+        "emotion": "curious",
+        "impact": "increase_bond",
+        "importance": 0.8
+    },
+    {
+        "event": "普通对话：他们的那首dont go away,真的好好听",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：听one ok rock呢",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    }
+]
