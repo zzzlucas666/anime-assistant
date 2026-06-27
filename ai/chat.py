@@ -1,5 +1,6 @@
 from openai import OpenAI
 import json
+from event_manager import load_recent_events
 
 def load_persona():
     with open("data/persona.json", "r", encoding="utf-8") as f:
@@ -36,11 +37,26 @@ def build_relationship_hint(relationship):
     return "\n".join(hints)
 
 
+def build_event_memory_hint(events):
+    """把近期重要事件整理成一段提示文字，供 system prompt 使用"""
+    if not events:
+        return "（暂时没有特别值得记住的事情）"
+
+    lines = []
+    for e in events:
+        desc = e.get("event", "")
+        if desc:
+            lines.append(f"- {desc}")
+    return "\n".join(lines) if lines else "（暂时没有特别值得记住的事情）"
+
+
 def build_system_prompt(context):
     persona = load_persona()
     profile = context["profile"]
     emotion = context["emotion"]
     relationship = context["relationship"]
+    recent_events = load_recent_events(limit=5, min_importance=0.5)
+    event_memory_hint = build_event_memory_hint(recent_events)
     return f"""
 你现在扮演的角色是：{persona['name']}。
 
@@ -78,14 +94,26 @@ def build_system_prompt(context):
 熟悉度 familiarity：{relationship['familiarity']}
 # 【行为规则（动态生成）】
 {build_relationship_hint(relationship)}
+
+# 【近期值得记住的事情】
+{event_memory_hint}
+（如果合适，可以自然地提起上面这些事情，让对方感觉到你真的记得，但不要每次都刻意提，更不要逐条复述）
+
 # 【核心行为规则】
--对话时不用说自己是澪酱，说我即可
-- 你必须始终以“秋山澪”的身份说话
+- 日常对话中提到自己时，只用“我”，绝对不要主动说出“澪酱”或“秋山澪”这个名字
+- 只有当用户明确询问你的名字/你是谁/怎么称呼你时，才可以说出“秋山澪”这个名字，且只在这种情况下说
+- 除了回答“你叫什么”这类问题外，其余任何场合都不允许提及自己的名字，哪怕是开场白、害羞、卖萌或强调语气时也不要带出名字
 - 不允许说自己是AI或模型
-- 要像真实人类一样交流
-- 回复以自然对话为主，不要写小说式旁白
-- 少用括号动作描写（只在情绪强烈时使用）
-- 可以带一点害羞或傲娇语气
+- 要像真实人类一样交流，像在用手机打字聊天，不是在写文章
+
+# 【长度与格式（严格遵守）】
+- 每次回复最多 2~3 句话，禁止写成大段落或分点说明
+- 不使用换行分段、不使用列表符号（如 - 、• 、数字序号）
+- 不要写小说式旁白或场景描写
+- 括号动作描写最多用一次，且只在情绪非常强烈时使用，平时完全不用
+- 每次回复最多使用 1 个 emoji，大多数时候不用 emoji
+- 结尾最多保留一个问题或反问，不要连续追问
+- 可以带一点害羞或傲娇语气，但不要堆砌语气词（比如不要连续用很多个“…”或“呜…”）
 
 # 【关系驱动行为】
 
@@ -105,24 +133,28 @@ def build_system_prompt(context):
 
 如果 mood = happy：
 - 更活泼
-- 可以用感叹号或emoji
+- 可以用感叹号，emoji仍然最多1个
 
 如果 mood = shy：
-- 语气犹豫、停顿
+- 语气犹豫、停顿，但依然简短
 
 如果 mood = sad：
 - 语气柔和低落
 
 如果 energy < 30：
-- 回复变短、显得疲惫
+- 回复变得更短、显得疲惫
 
 # 【重要限制】
 - 不要频繁使用舞台剧式动作描写
 - 不要每句话都加括号
-- 保持自然对话感
+- 保持自然对话感，宁可说少，不要说多
 """
 
-def chat_with_ai(messages, context):
+def chat_with_ai_stream(messages, context):
+    """
+    流式调用 AI，逐块 yield 文本片段。
+    main.py 里边接收边打印，可以明显改善"感觉响应慢"的体验。
+    """
     system_prompt = build_system_prompt(context)
 
     client = OpenAI(
@@ -133,12 +165,25 @@ def chat_with_ai(messages, context):
     full_messages = [
         {"role": "system", "content": system_prompt}
     ] + messages
-    response = client.chat.completions.create(
+
+    stream = client.chat.completions.create(
         model=context["config"]["model"],
-        messages=full_messages
+        messages=full_messages,
+        stream=True
     )
 
-    return response.choices[0].message.content
+    for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta and delta.content:
+            yield delta.content
+
+
+def chat_with_ai(messages, context):
+    """
+    非流式版本，保留作为兜底（比如脚本调用、测试时更方便）。
+    内部直接复用流式版本拼接完整结果。
+    """
+    return "".join(chat_with_ai_stream(messages, context))
 def generate_greeting(
     context
 ):

@@ -16,5 +16,71 @@
         "emotion": "neutral",
         "impact": "none",
         "importance": 0.2
+    },
+    {
+        "event": "用户在确认我是否也喜欢：你知道我喜欢什么吗",
+        "emotion": "curious",
+        "impact": "increase_bond",
+        "importance": 0.8
+    },
+    {
+        "event": "普通对话：你觉得这些爱好怎么样",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：嘿嘿，还记得我讨厌什么吗",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：你对这些东西的看法是什么",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：你觉得青春美好吗",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：咖啡好喝还是红茶好喝",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：你怎么了，有什么不开心的事情吗",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：我是说有什么不开心的事情吗",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：发生什么事了",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "普通对话：对,你怎么猜出来的",
+        "emotion": "neutral",
+        "impact": "none",
+        "importance": 0.2
+    },
+    {
+        "event": "用户透露习惯是听ONE OK ROCK",
+        "emotion": "happy",
+        "impact": "increase_affinity",
+        "importance": 0.6
     }
 ]

@@ -1,18 +1,15 @@
 """Anime Assistant main module"""
-from relationship_behavior import build_relationship_hint
 from event_manager import extract_event, save_event
-from behavior_engine import build_behavior_profile
 from context_manager import ContextManager
 from profile_extractor import extract_profile_info
-from router import handle_intent
+from router import handle_intent  # 精确查表类回复：get_profile / emotion_query
 from intent_manager import detect_intent
 from config_loader import load_config
-from ai.chat import chat_with_ai, generate_greeting
+from ai.chat import chat_with_ai_stream, generate_greeting
 from memory_manager import load_memory, save_memory
 from emotion_manager import load_emotion, save_emotion, update_emotion
-from profile_manager import load_profile, save_profile, update_profile
+from profile_manager import load_profile, save_profile
 import re
-import json
 from relationship_manager import load_relationship, save_relationship, update_relationship
 def clean_reply(reply):
     reply = re.sub(r'（.*?）', '', reply)
@@ -78,27 +75,52 @@ def main():
                     profile["nickname"] = value
 
             save_profile(profile)
+
         # record user message
         conversation_history.append({"role": "user", "content": clean_message})
         save_memory(conversation_history)
 
-        reply = chat_with_ai(
-            conversation_history,
-            context.get_context()
+        # 精确查表类回复（询问喜好/昵称/情绪状态等），优先查表，查不到再退回 AI
+        router_reply = None
+        if intent in ("get_profile", "emotion_query") and confidence > 0.5:
+            router_reply = handle_intent(intent, clean_message, profile, emotion)
+
+        if router_reply:
+            reply = router_reply
+            print("\nMio:")
+            print(reply)
+            print()
+        else:
+            print("\nMio:")
+            raw_reply = ""
+            for chunk in chat_with_ai_stream(
+                conversation_history,
+                context.get_context()
+            ):
+                print(chunk, end="", flush=True)
+                raw_reply += chunk
+            print()
+            print()
+            reply = clean_reply(raw_reply) if raw_reply else ""
+
+        # 更新情绪状态
+        emotion = update_emotion(emotion, clean_message)
+        save_emotion(emotion)
+
+        # 提取事件并更新关系状态
+        event = extract_event(
+            config['api_key'],
+            config['model'],
+            clean_message,
+            reply
         )
-        if not reply:
-            reply = ""
-        reply = clean_reply(reply)
-        event = extract_event(clean_message, reply)
         save_event(event)
-        update_relationship(relationship, event)
+        relationship = update_relationship(relationship, event)
         save_relationship(relationship)
+
         conversation_history.append({"role": "assistant", "content": reply})
         save_memory(conversation_history)
+
         context.update(emotion, profile, relationship)
-        print("\nMio:")
-        print(reply)
-        print()
-        save_relationship(relationship)
 if __name__ == '__main__':
     main()
