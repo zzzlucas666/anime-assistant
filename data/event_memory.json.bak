@@ -82,5 +82,19 @@
         "emotion": "happy",
         "impact": "increase_affinity",
         "importance": 0.6
+    },
+    {
+        "event": "用户请求AI多关心自己",
+        "emotion": "sad",
+        "impact": "increase_bond",
+        "importance": 0.6
+    },
+    {
+        "id": "cac1e748d5b84883828f51b2e08b5321",
+        "event": "用户分享了对Oasis《Don't Go Away》的感触，AI以陪伴和安慰回应。",
+        "emotion": "touched",
+        "impact": "increase_bond",
+        "importance": 0.7,
+        "notified": false
     }
 ]

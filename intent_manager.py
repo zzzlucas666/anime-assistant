@@ -54,7 +54,6 @@ def detect_intent(api_key, model, user_message, emotion, profile):
 
 当前情绪：
 - mood: {emotion['mood']}
-- affection: {emotion['affection']}
 - energy: {emotion['energy']}
 
 ---

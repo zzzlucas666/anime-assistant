@@ -245,7 +245,7 @@ def generate_greeting(
 当前状态：
 
 心情：{context['emotion']['mood']}
-好感度：{context['emotion']['affection']}
+好感度：{context['relationship']['affection']}
 精力：{context['emotion']['energy']}
 
 用户资料：
@@ -281,3 +281,55 @@ def generate_greeting(
     except Exception as e:
         print(f"[chat] 生成开场白失败，使用默认开场白：{e}")
         return "嗯…你来了。"
+
+
+# 主动消息彻底失败时的兜底话术
+PROACTIVE_FALLBACK_REPLIES = [
+    "在干嘛呢…突然有点想找你说话。",
+    "嗯…有点想你了。",
+    "你那边还好吗？"
+]
+
+
+def generate_proactive_message(context, reason_hint):
+    """
+    生成一句"主动找用户说话"的内容。
+    复用 build_system_prompt（保证语气/长度/格式规则跟正常聊天一致），
+    在后面追加一段"特殊场景"说明，告诉AI现在是主动找用户说话，以及原因。
+
+    reason_hint: 一句描述触发原因的话（给AI看的内部提示，不会展示给用户），
+                 比如"已经很久没聊天了，而且心情不太好，想找他说说话"。
+    """
+    import random
+
+    system_prompt = build_system_prompt(context)
+
+    special_instruction = f"""
+
+# 【特殊场景：主动发起对话】
+现在不是用户先说话，而是你自己想主动找Lucas说一句话。
+原因（仅供你参考，不要直接说出来，更不要提"触发""系统""检测"这类技术词汇）：
+{reason_hint}
+
+要求：
+- 只说一句话，自然、符合你的人设和当前状态
+- 不要解释自己为什么突然说话
+- 不要说"我注意到""系统提示"等任何暴露后台机制的话
+"""
+
+    client = OpenAI(
+        api_key=context["config"]["api_key"],
+        base_url="https://api.deepseek.com"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=context["config"]["model"],
+            messages=[
+                {"role": "system", "content": system_prompt + special_instruction}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[chat] 生成主动消息失败，使用兜底话术：{e}")
+        return random.choice(PROACTIVE_FALLBACK_REPLIES)

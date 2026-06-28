@@ -1,4 +1,4 @@
-def handle_intent(intent, clean_message, profile, emotion):
+def handle_intent(intent, clean_message, profile, emotion, relationship):
 
     if intent == "get_profile":
 
@@ -61,7 +61,7 @@ def handle_intent(intent, clean_message, profile, emotion):
 
         mood = emotion.get("mood", "")
         energy = emotion.get("energy", "")
-        affection = emotion.get("affection", "")
+        affection = relationship.get("affection", "")
 
         mood_text = {
             "happy": "心情很好",
@@ -100,7 +100,7 @@ def handle_intent(intent, clean_message, profile, emotion):
                 return f"现在倒没有害羞，{mood_text}。"
 
         # 笼统的"心情怎么样" / "你现在怎么样" / "状态如何"
-        if any(k in clean_message for k in ["心情", "状态", "怎么样", "感觉如何", "你还好吗", "怎么"]):
+        if any(k in clean_message for k in ["心情", "状态", "怎么样", "感觉如何", "你还好吗"]):
             return f"现在{mood_text}，精力值 {energy}/100。"
 
         # 默认兜底

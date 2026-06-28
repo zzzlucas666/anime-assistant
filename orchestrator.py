@@ -14,6 +14,7 @@ main.py 不再直接调用各个 manager，只负责：
 
 from concurrent.futures import ThreadPoolExecutor
 import re
+import threading
 
 from intent_manager import detect_intent
 from profile_extractor import extract_profile_info
@@ -24,6 +25,7 @@ from event_manager import extract_event, save_event
 from relationship_manager import update_relationship, save_relationship
 from profile_manager import save_profile
 from memory_manager import save_memory
+from interaction_tracker import update_last_interaction_time
 
 
 def clean_reply(reply):
@@ -32,13 +34,16 @@ def clean_reply(reply):
 
 
 class ConversationOrchestrator:
-    def __init__(self, config, context, conversation_history, emotion, profile, relationship):
+    def __init__(self, config, context, conversation_history, emotion, profile, relationship, lock=None):
         self.config = config
         self.context = context
         self.conversation_history = conversation_history
         self.emotion = emotion
         self.profile = profile
         self.relationship = relationship
+        # 跟 InitiativeEngine 共用同一把锁，避免两边同时读写状态文件。
+        # 如果没传进来（比如单独测试这个类），就自己建一把，保证不报错。
+        self.lock = lock if lock is not None else threading.Lock()
         # 给意图识别 + 资料提取并行用的小线程池，常驻即可，不用每轮新建
         self._executor = ThreadPoolExecutor(max_workers=2)
 
@@ -107,16 +112,23 @@ class ConversationOrchestrator:
         intent = intent_result.get("intent", "")
         confidence = intent_result.get("confidence", 0)
 
-        self._apply_profile_update(intent, confidence, profile_info)
+        # 接下来要修改共享状态（profile/conversation_history）和写文件，
+        # 跟 InitiativeEngine 的后台检查共用同一把锁，避免并发写冲突。
+        # AI调用本身（上面的 intent/profile_info）不占锁，不阻塞后台线程。
+        with self.lock:
+            self._apply_profile_update(intent, confidence, profile_info)
 
-        # 记录用户消息
-        self.conversation_history.append({"role": "user", "content": clean_message})
-        save_memory(self.conversation_history)
+            # 记录用户消息
+            self.conversation_history.append({"role": "user", "content": clean_message})
+            save_memory(self.conversation_history)
+
+            # 用户刚说了话，更新"上次互动时间"
+            update_last_interaction_time()
 
         # 精确查表类回复（询问喜好/昵称/情绪状态等），优先查表，查不到再退回 AI
         router_reply = None
         if intent in ("get_profile", "emotion_query") and confidence > 0.5:
-            router_reply = handle_intent(intent, clean_message, self.profile, self.emotion)
+            router_reply = handle_intent(intent, clean_message, self.profile, self.emotion, self.relationship)
 
         return {
             "clean_message": clean_message,
@@ -157,11 +169,9 @@ class ConversationOrchestrator:
 
         reply = router_reply if router_reply else (clean_reply(raw_reply) if raw_reply else "")
 
-        # 更新情绪状态
-        self.emotion = update_emotion(self.emotion, clean_message)
-        save_emotion(self.emotion)
-
-        # 提取事件并更新关系状态（router 命中的精确回复不算"事件"，跳过提取）
+        # extract_event 是 AI 调用，可能要等几秒，不应该占着锁不放，
+        # 否则会让 InitiativeEngine 的后台检查白等。先在锁外面把结果算出来。
+        event = None
         if not router_reply:
             event = extract_event(
                 self.config['api_key'],
@@ -169,15 +179,23 @@ class ConversationOrchestrator:
                 clean_message,
                 reply
             )
-            save_event(event)
-            self.relationship = update_relationship(self.relationship, event)
-            save_relationship(self.relationship)
 
-        # 记录助手消息
-        self.conversation_history.append({"role": "assistant", "content": reply})
-        save_memory(self.conversation_history)
+        with self.lock:
+            # 更新情绪状态（依据 event 的 AI 判断结果，而不是关键词匹配）
+            self.emotion = update_emotion(self.emotion, event)
+            save_emotion(self.emotion)
 
-        self.context.update(self.emotion, self.profile, self.relationship)
+            # 更新关系状态（router 命中的精确回复不算"事件"，event 为 None 时也安全跳过）
+            if not router_reply:
+                save_event(event)
+                self.relationship = update_relationship(self.relationship, event)
+                save_relationship(self.relationship)
+
+            # 记录助手消息
+            self.conversation_history.append({"role": "assistant", "content": reply})
+            save_memory(self.conversation_history)
+
+            self.context.update(self.emotion, self.profile, self.relationship)
 
         return reply
 

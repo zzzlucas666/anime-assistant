@@ -1,5 +1,6 @@
 from openai import OpenAI
 import json
+import uuid
 from Storage_utils import safe_load_json, safe_save_json
 
 EVENT_PATH = "data/event_memory.json"
@@ -85,10 +86,12 @@ AI的回复：
         return None
 
     return {
+        "id": uuid.uuid4().hex,
         "event": result.get("event", ""),
         "emotion": result.get("emotion", "neutral"),
         "impact": result.get("impact", "none"),
-        "importance": result.get("importance", 0.3)
+        "importance": result.get("importance", 0.3),
+        "notified": False
     }
 
 
@@ -117,3 +120,32 @@ def load_recent_events(limit=5, min_importance=0.5):
     ]
 
     return important_events[-limit:]
+
+
+def get_unnotified_important_events(min_importance=0.7):
+    """
+    获取"重要且还没被主动提起过"的事件，供 Initiative Engine 判断是否要
+    主动找用户聊起某件事。
+    """
+    data = safe_load_json(EVENT_PATH, default_events)
+
+    return [
+        e for e in data
+        if isinstance(e, dict)
+        and e.get("importance", 0) >= min_importance
+        and not e.get("notified", False)
+    ]
+
+
+def mark_event_notified(event_id):
+    """把某条事件标记为"已经主动提起过"，避免下次又重复提起同一件事"""
+    data = safe_load_json(EVENT_PATH, default_events)
+
+    changed = False
+    for e in data:
+        if isinstance(e, dict) and e.get("id") == event_id:
+            e["notified"] = True
+            changed = True
+
+    if changed:
+        safe_save_json(EVENT_PATH, data)
