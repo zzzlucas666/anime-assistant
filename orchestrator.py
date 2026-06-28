@@ -1,0 +1,185 @@
+"""
+ConversationOrchestrator —— 负责编排"处理一轮对话"需要的所有步骤。
+
+main.py 不再直接调用各个 manager，只负责：
+    1. 读取用户输入
+    2. 调用 orchestrator.prepare_turn() 做意图/资料判断
+    3. 调用 orchestrator.stream_reply() 拿到回复（流式打印）
+    4. 调用 orchestrator.finalize_turn() 做收尾（事件提取、状态更新、存历史）
+
+这样 main.py 只剩"输入-输出-循环"的壳子，业务流程都收在这里，
+以后 Initiative Engine 需要"生成一轮回复"时，也能直接复用这个类，
+不用再复制一遍 main.py 里的逻辑。
+"""
+
+from concurrent.futures import ThreadPoolExecutor
+import re
+
+from intent_manager import detect_intent
+from profile_extractor import extract_profile_info
+from router import handle_intent
+from ai.chat import chat_with_ai_stream
+from emotion_manager import update_emotion, save_emotion
+from event_manager import extract_event, save_event
+from relationship_manager import update_relationship, save_relationship
+from profile_manager import save_profile
+from memory_manager import save_memory
+
+
+def clean_reply(reply):
+    reply = re.sub(r'（.*?）', '', reply)
+    return reply.strip()
+
+
+class ConversationOrchestrator:
+    def __init__(self, config, context, conversation_history, emotion, profile, relationship):
+        self.config = config
+        self.context = context
+        self.conversation_history = conversation_history
+        self.emotion = emotion
+        self.profile = profile
+        self.relationship = relationship
+        # 给意图识别 + 资料提取并行用的小线程池，常驻即可，不用每轮新建
+        self._executor = ThreadPoolExecutor(max_workers=2)
+
+    @staticmethod
+    def _clean_input(user_message):
+        return (
+            user_message
+            .replace("？", "")
+            .replace("?", "")
+            .strip()
+        )
+
+    def _apply_profile_update(self, intent, confidence, profile_info):
+        """根据 profile_extractor 的结果更新 profile（如果置信度够高）"""
+        action = profile_info.get("action")
+        value = profile_info.get("value")
+
+        if intent != "set_profile" or confidence <= 0.5:
+            return
+
+        if action == "add_like":
+            if value and value not in self.profile["likes"]:
+                self.profile["likes"].append(value)
+
+        elif action == "add_dislike":
+            if value and value not in self.profile["dislikes"]:
+                self.profile["dislikes"].append(value)
+
+        elif action == "set_name":
+            if value:
+                self.profile["name"] = value
+
+        elif action == "set_nickname":
+            if value:
+                self.profile["nickname"] = value
+
+        save_profile(self.profile)
+
+    def prepare_turn(self, user_message):
+        """
+        处理输入清洗、意图识别、资料提取（并行执行），
+        并判断本轮要不要走 router 精确回复。
+        返回一个 dict，供 stream_reply / finalize_turn 使用。
+        """
+        clean_message = self._clean_input(user_message)
+
+        # detect_intent 和 extract_profile_info 互不依赖，并行执行省一次往返延迟
+        intent_future = self._executor.submit(
+            detect_intent,
+            self.config['api_key'],
+            self.config['model'],
+            clean_message,
+            self.emotion,
+            self.profile
+        )
+        profile_future = self._executor.submit(
+            extract_profile_info,
+            self.config['api_key'],
+            self.config['model'],
+            clean_message
+        )
+
+        intent_result = intent_future.result()
+        profile_info = profile_future.result()
+
+        intent = intent_result.get("intent", "")
+        confidence = intent_result.get("confidence", 0)
+
+        self._apply_profile_update(intent, confidence, profile_info)
+
+        # 记录用户消息
+        self.conversation_history.append({"role": "user", "content": clean_message})
+        save_memory(self.conversation_history)
+
+        # 精确查表类回复（询问喜好/昵称/情绪状态等），优先查表，查不到再退回 AI
+        router_reply = None
+        if intent in ("get_profile", "emotion_query") and confidence > 0.5:
+            router_reply = handle_intent(intent, clean_message, self.profile, self.emotion)
+
+        return {
+            "clean_message": clean_message,
+            "intent": intent,
+            "confidence": confidence,
+            "router_reply": router_reply
+        }
+
+    def stream_reply(self, prepared):
+        """
+        生成回复内容，逐块 yield。
+        命中 router 时直接整句 yield 一次；否则走 AI 流式生成。
+        """
+        router_reply = prepared["router_reply"]
+
+        if router_reply:
+            yield router_reply
+            return
+
+        for chunk in chat_with_ai_stream(
+            self.conversation_history,
+            self.context.get_context()
+        ):
+            yield chunk
+
+    def finalize_turn(self, prepared, raw_reply):
+        """
+        回复打印完之后的收尾工作：
+        - 清洗回复文本
+        - 更新情绪
+        - 提取事件、更新关系（这两步不影响用户已经看到的回复，放在打印之后做即可）
+        - 记录助手消息、同步 context
+
+        返回清洗后的 reply，方便 main.py 需要时使用。
+        """
+        router_reply = prepared["router_reply"]
+        clean_message = prepared["clean_message"]
+
+        reply = router_reply if router_reply else (clean_reply(raw_reply) if raw_reply else "")
+
+        # 更新情绪状态
+        self.emotion = update_emotion(self.emotion, clean_message)
+        save_emotion(self.emotion)
+
+        # 提取事件并更新关系状态（router 命中的精确回复不算"事件"，跳过提取）
+        if not router_reply:
+            event = extract_event(
+                self.config['api_key'],
+                self.config['model'],
+                clean_message,
+                reply
+            )
+            save_event(event)
+            self.relationship = update_relationship(self.relationship, event)
+            save_relationship(self.relationship)
+
+        # 记录助手消息
+        self.conversation_history.append({"role": "assistant", "content": reply})
+        save_memory(self.conversation_history)
+
+        self.context.update(self.emotion, self.profile, self.relationship)
+
+        return reply
+
+    def shutdown(self):
+        self._executor.shutdown(wait=False)

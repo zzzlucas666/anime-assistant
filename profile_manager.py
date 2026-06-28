@@ -1,4 +1,19 @@
-import json
+from Storage_utils import safe_load_json, safe_save_json
+
+PROFILE_PATH = "data/user_profile.json"
+
+
+def default_profile():
+    return {
+        "name": "",
+        "nickname": "",
+        "names": [],
+        "nicknames": [],
+        "likes": [],
+        "dislikes": []
+    }
+
+
 def is_valid_memory(text):
 
     INVALID_WORDS = [
@@ -68,26 +83,11 @@ def update_profile(profile, user_message):
             profile["nickname"] = nickname
             profile["nicknames"].append(nickname)
     return profile
+
+
 def load_profile():
-    with open(
-        "data/user_profile.json",
-        "r",
-        encoding="utf-8"
-    ) as file:
-        return json.load(file)
+    return safe_load_json(PROFILE_PATH, default_profile)
 
 
 def save_profile(profile):
-    with open(
-        "data/user_profile.json",
-        "w",
-        encoding="utf-8"
-    ) as file:
-        json.dump(
-            profile,
-            file,
-            ensure_ascii=False,
-            indent=4
-        )
-
-
+    safe_save_json(PROFILE_PATH, profile)

@@ -1,6 +1,12 @@
 from openai import OpenAI
 import json
-import os
+from Storage_utils import safe_load_json, safe_save_json
+
+EVENT_PATH = "data/event_memory.json"
+
+
+def default_events():
+    return []
 
 
 def extract_event(api_key, model, user_message, ai_reply):
@@ -8,14 +14,18 @@ def extract_event(api_key, model, user_message, ai_reply):
     用 AI 判断这轮对话里是否发生了"值得记住的事件"，
     覆盖范围比之前的规则匹配（只认"喜欢"+"吗"）广得多，
     比如：用户提到的计划、烦恼、重要日子、对AI的评价、新信息等。
+
+    事件记忆不是关键路径，任何失败都直接返回 None（不记录这次事件），
+    不应该因为这里出错就影响主回复或让程序崩溃。
     """
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.deepseek.com"
-    )
+    try:
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com"
+        )
 
-    prompt = f"""
+        prompt = f"""
 你是一个事件记忆提取器，负责从一轮对话中判断是否发生了"值得长期记住的事件"。
 
 值得记住的事件包括（但不限于）：
@@ -52,15 +62,19 @@ AI的回复：
 只返回JSON，不要解释，不要markdown。
 """
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": prompt}
-        ],
-        temperature=0
-    )
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": prompt}
+            ],
+            temperature=0
+        )
 
-    content = response.choices[0].message.content
+        content = response.choices[0].message.content
+
+    except Exception as e:
+        print(f"[event_manager] 事件提取调用失败（已跳过本轮事件记忆）：{e}")
+        return None
 
     try:
         result = json.loads(content)
@@ -76,21 +90,15 @@ AI的回复：
         "impact": result.get("impact", "none"),
         "importance": result.get("importance", 0.3)
     }
+
+
 def save_event(event):
     if not event:
         return
 
-    try:
-        os.makedirs("data", exist_ok=True)
-        with open("data/event_memory.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except:
-        data = []
-
+    data = safe_load_json(EVENT_PATH, default_events)
     data.append(event)
-
-    with open("data/event_memory.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    safe_save_json(EVENT_PATH, data)
 
 
 def load_recent_events(limit=5, min_importance=0.5):
@@ -101,11 +109,7 @@ def load_recent_events(limit=5, min_importance=0.5):
     - 只挑选 importance >= min_importance 的事件（过滤掉"普通对话"这类噪音）
     - 按时间顺序保留最近 limit 条（越新越靠后）
     """
-    try:
-        with open("data/event_memory.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return []
+    data = safe_load_json(EVENT_PATH, default_events)
 
     important_events = [
         e for e in data

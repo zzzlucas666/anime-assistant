@@ -150,11 +150,16 @@ def build_system_prompt(context):
 - 保持自然对话感，宁可说少，不要说多
 """
 
-def chat_with_ai_stream(messages, context):
-    """
-    流式调用 AI，逐块 yield 文本片段。
-    main.py 里边接收边打印，可以明显改善"感觉响应慢"的体验。
-    """
+# 主回复彻底失败时的兜底话术（角色内语气，不暴露"AI/系统错误"字眼）
+FALLBACK_REPLIES = [
+    "嗯…网络好像有点不稳定，刚才走神了，能再说一次吗？",
+    "抱歉…刚刚好像没听清，可以再说一遍吗？",
+    "嗯？信号好像有点问题…你刚才说什么？"
+]
+
+
+def _create_stream(messages, context):
+    """单次创建一个流式请求，失败时直接抛出异常，由上层决定是否重试"""
     system_prompt = build_system_prompt(context)
 
     client = OpenAI(
@@ -166,16 +171,56 @@ def chat_with_ai_stream(messages, context):
         {"role": "system", "content": system_prompt}
     ] + messages
 
-    stream = client.chat.completions.create(
+    return client.chat.completions.create(
         model=context["config"]["model"],
         messages=full_messages,
         stream=True
     )
 
-    for chunk in stream:
-        delta = chunk.choices[0].delta
-        if delta and delta.content:
-            yield delta.content
+
+def chat_with_ai_stream(messages, context):
+    """
+    流式调用 AI，逐块 yield 文本片段。
+
+    容错策略：
+    - 如果"创建连接"这一步失败（网络/鉴权/限流等），自动重试一次；
+      仍然失败则 yield 一句角色内兜底话术，不让程序崩溃。
+    - 如果连接建立成功、已经开始吐字之后才中途断线，
+      不会重试（避免内容重复），而是在已输出内容后补一句自然的收尾。
+    """
+    import random
+
+    stream = None
+    last_error = None
+
+    for attempt in range(2):  # 最多尝试 2 次：首次 + 重试 1 次
+        try:
+            stream = _create_stream(messages, context)
+            break
+        except Exception as e:
+            last_error = e
+            print(f"[chat] 创建对话流失败（第 {attempt + 1} 次尝试）：{e}")
+
+    if stream is None:
+        print(f"[chat] 重试后仍失败，使用兜底话术。最后一次错误：{last_error}")
+        yield random.choice(FALLBACK_REPLIES)
+        return
+
+    has_yielded_any = False
+    try:
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                has_yielded_any = True
+                yield delta.content
+    except Exception as e:
+        print(f"[chat] 流式输出中途中断：{e}")
+        if has_yielded_any:
+            # 已经说了一部分话，不重试（避免重复），自然收个尾
+            yield "…呃，网络突然卡了一下，先这样吧。"
+        else:
+            # 一个字都没吐出来，等同于彻底失败，用兜底话术
+            yield random.choice(FALLBACK_REPLIES)
 
 
 def chat_with_ai(messages, context):
@@ -222,14 +267,17 @@ def generate_greeting(
 信任：{context['relationship']['trust']}
 熟悉度：{context['relationship']['familiarity']}
 """
-    response = client.chat.completions.create(
-        model=context['config']['model'],
-        messages=[
-            {
-                "role": "system",
-                "content": prompt
-            }
-        ]
-    )
-
-    return response.choices[0].message.content
+    try:
+        response = client.chat.completions.create(
+            model=context['config']['model'],
+            messages=[
+                {
+                    "role": "system",
+                    "content": prompt
+                }
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[chat] 生成开场白失败，使用默认开场白：{e}")
+        return "嗯…你来了。"

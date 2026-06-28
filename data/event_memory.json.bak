@@ -82,11 +82,5 @@
         "emotion": "happy",
         "impact": "increase_affinity",
         "importance": 0.6
-    },
-    {
-        "event": "用户请求AI多关心自己",
-        "emotion": "sad",
-        "impact": "increase_bond",
-        "importance": 0.6
     }
 ]

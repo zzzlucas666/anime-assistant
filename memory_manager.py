@@ -1,31 +1,27 @@
-import json
+from Storage_utils import safe_load_json, safe_save_json
 
+MEMORY_PATH = "data/conversation_history.json"
 MAX_HISTORY = 50
+
+
+def default_history():
+    return []
+
+
 def clean_history(history):
     return [
         msg
         for msg in history
         if msg.get("content")
     ]
+
+
 def save_memory(conversation_history):
     conversation_history = clean_history(conversation_history)
-    coversation_history = conversation_history[-MAX_HISTORY:]
-    with open(
-        "data/conversation_history.json",
-        "w",
-        encoding="utf-8"
-    ) as file:
-        json.dump(
-            conversation_history,
-            file,
-            ensure_ascii=False,
-            indent=4
-        )
+    conversation_history = conversation_history[-MAX_HISTORY:]
+    safe_save_json(MEMORY_PATH, conversation_history)
+
+
 def load_memory():
-    with open(
-        "data/conversation_history.json",
-        "r",
-        encoding="utf-8"
-    ) as file:
-        return json.load(file)
+    return safe_load_json(MEMORY_PATH, default_history)
 

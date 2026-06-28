@@ -49,21 +49,28 @@ none
 只返回JSON。
 """
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": prompt
-            }
-        ]
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": prompt
+                }
+            ]
+        )
+    except Exception as e:
+        print(f"[profile_extractor] 资料提取调用失败（已跳过本轮资料更新）：{e}")
+        return {
+            "action": "none",
+            "value": ""
+        }
 
     try:
         return json.loads(
             response.choices[0].message.content
         )
-    except:
+    except Exception:
         return {
             "action": "none",
             "value": ""

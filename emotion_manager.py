@@ -1,13 +1,22 @@
-import json
+from Storage_utils import safe_load_json, safe_save_json
+
+EMOTION_PATH = "data/emotion_state.json"
+
+
+def default_emotion():
+    return {
+        "mood": "neutral",
+        "energy": 80,
+        "affection": 50
+    }
+
 
 def load_emotion():
-    with open("data/emotion_state.json", "r", encoding="utf-8") as f:
-        return json.load(f)
+    return safe_load_json(EMOTION_PATH, default_emotion)
 
 
 def save_emotion(emotion):
-    with open("data/emotion_state.json", "w", encoding="utf-8") as f:
-        json.dump(emotion, f, ensure_ascii=False, indent=4)
+    safe_save_json(EMOTION_PATH, emotion)
 
 
 # =========================

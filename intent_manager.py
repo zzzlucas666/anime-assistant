@@ -71,19 +71,26 @@ def detect_intent(api_key, model, user_message, emotion, profile):
 - confidence必须是0~1数字
 """
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": prompt}
-        ],
-        temperature=0
-    )
-
-    content = response.choices[0].message.content
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": prompt}
+            ],
+            temperature=0
+        )
+        content = response.choices[0].message.content
+    except Exception as e:
+        print(f"[intent_manager] 意图识别调用失败（已使用默认意图 chat）：{e}")
+        return {
+            "intent": "chat",
+            "confidence": 0.0,
+            "slots": {}
+        }
 
     try:
         return json.loads(content)
-    except:
+    except Exception:
         return {
             "intent": "chat",
             "confidence": 0.5,
