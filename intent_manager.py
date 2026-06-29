@@ -1,5 +1,8 @@
 from openai import OpenAI
 import json
+from logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 INTENT_SCHEMA = {
     "intent": "",
@@ -80,7 +83,7 @@ def detect_intent(api_key, model, user_message, emotion, profile):
         )
         content = response.choices[0].message.content
     except Exception as e:
-        print(f"[intent_manager] 意图识别调用失败（已使用默认意图 chat）：{e}")
+        logger.warning("意图识别调用失败（已使用默认意图 chat）：%s", e)
         return {
             "intent": "chat",
             "confidence": 0.0,

@@ -22,7 +22,11 @@ import datetime
 
 from event_manager import get_unnotified_important_events, mark_event_notified
 from interaction_tracker import load_last_interaction_time, update_last_interaction_time
+from proactive_tracker import can_trigger_proactive, record_proactive_trigger
 from ai.chat import generate_proactive_message
+from logger_utils import get_logger
+
+logger = get_logger(__name__)
 from memory_manager import save_memory
 
 
@@ -38,6 +42,8 @@ class InitiativeEngine:
         lock,
         check_interval_minutes=5,
         idle_threshold_minutes=30,
+        proactive_min_interval_minutes=None,
+        proactive_max_per_day=None,
     ):
         self.config = config
         self.context = context
@@ -48,6 +54,9 @@ class InitiativeEngine:
         self.lock = lock
         self.check_interval_minutes = check_interval_minutes
         self.idle_threshold_minutes = idle_threshold_minutes
+        # 没传就用 proactive_tracker 里的默认值
+        self.proactive_min_interval_minutes = proactive_min_interval_minutes
+        self.proactive_max_per_day = proactive_max_per_day
         self._stop_flag = threading.Event()
 
     # ------------------------------------------------------------------
@@ -109,12 +118,24 @@ class InitiativeEngine:
         save_memory(self.conversation_history)
         # 主动消息本身也算一次"互动"，避免下一次检查又立刻重复触发
         update_last_interaction_time()
+        # 记录冷却状态（今日计数 + 上次触发时间）
+        record_proactive_trigger()
 
     def check_and_trigger(self):
         """
         按优先级依次判断，命中一个就生成消息并返回；都没命中返回 None。
         调用前必须持有 self.lock（这个方法内部不加锁，由外部 run_loop 统一管理）。
         """
+        # 全局冷却闸：即使触发条件持续满足，也不会无限期频繁触发
+        cooldown_kwargs = {}
+        if self.proactive_min_interval_minutes is not None:
+            cooldown_kwargs["min_interval_minutes"] = self.proactive_min_interval_minutes
+        if self.proactive_max_per_day is not None:
+            cooldown_kwargs["max_per_day"] = self.proactive_max_per_day
+
+        if not can_trigger_proactive(**cooldown_kwargs):
+            return None
+
         idle_minutes = self._minutes_since_last_interaction()
 
         # 优先级1：未提及的重要事件
@@ -162,11 +183,11 @@ class InitiativeEngine:
                 with self.lock:
                     message = self.check_and_trigger()
             except Exception as e:
-                print(f"[initiative_engine] 后台检查出错（已忽略，下次继续尝试）：{e}")
+                logger.error("后台检查出错（已忽略，下次继续尝试）：%s", e)
                 continue
 
             if message:
-                print(f"\n\n[Mio 突然找你说话]\nMio:\n{message}\n\nYou: ", end="", flush=True)
+                print(f"\n\n[Mio 突然找你说话]\nMio:\n{message}\n")
 
     def stop(self):
         self._stop_flag.set()

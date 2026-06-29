@@ -1,6 +1,9 @@
 from openai import OpenAI
 import json
 from event_manager import load_recent_events
+from logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 def load_persona():
     with open("data/persona.json", "r", encoding="utf-8") as f:
@@ -199,10 +202,10 @@ def chat_with_ai_stream(messages, context):
             break
         except Exception as e:
             last_error = e
-            print(f"[chat] 创建对话流失败（第 {attempt + 1} 次尝试）：{e}")
+            logger.warning("创建对话流失败（第 %d 次尝试）：%s", attempt + 1, e)
 
     if stream is None:
-        print(f"[chat] 重试后仍失败，使用兜底话术。最后一次错误：{last_error}")
+        logger.error("重试后仍失败，使用兜底话术。最后一次错误：%s", last_error)
         yield random.choice(FALLBACK_REPLIES)
         return
 
@@ -214,7 +217,7 @@ def chat_with_ai_stream(messages, context):
                 has_yielded_any = True
                 yield delta.content
     except Exception as e:
-        print(f"[chat] 流式输出中途中断：{e}")
+        logger.warning("流式输出中途中断：%s", e)
         if has_yielded_any:
             # 已经说了一部分话，不重试（避免重复），自然收个尾
             yield "…呃，网络突然卡了一下，先这样吧。"
@@ -279,7 +282,7 @@ def generate_greeting(
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"[chat] 生成开场白失败，使用默认开场白：{e}")
+        logger.warning("生成开场白失败，使用默认开场白：%s", e)
         return "嗯…你来了。"
 
 
@@ -331,5 +334,5 @@ def generate_proactive_message(context, reason_hint):
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"[chat] 生成主动消息失败，使用兜底话术：{e}")
+        logger.warning("生成主动消息失败，使用兜底话术：%s", e)
         return random.choice(PROACTIVE_FALLBACK_REPLIES)

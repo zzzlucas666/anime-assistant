@@ -1,5 +1,8 @@
 from openai import OpenAI
 import json
+from logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 
 def extract_profile_info(
@@ -60,7 +63,7 @@ none
             ]
         )
     except Exception as e:
-        print(f"[profile_extractor] 资料提取调用失败（已跳过本轮资料更新）：{e}")
+        logger.warning("资料提取调用失败（已跳过本轮资料更新）：%s", e)
         return {
             "action": "none",
             "value": ""

@@ -2,6 +2,9 @@ from openai import OpenAI
 import json
 import uuid
 from Storage_utils import safe_load_json, safe_save_json
+from logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 EVENT_PATH = "data/event_memory.json"
 
@@ -74,7 +77,7 @@ AI的回复：
         content = response.choices[0].message.content
 
     except Exception as e:
-        print(f"[event_manager] 事件提取调用失败（已跳过本轮事件记忆）：{e}")
+        logger.warning("事件提取调用失败（已跳过本轮事件记忆）：%s", e)
         return None
 
     try:

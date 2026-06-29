@@ -10,6 +10,9 @@
 import json
 import os
 import shutil
+from logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 
 def safe_save_json(path, data):
@@ -28,7 +31,7 @@ def safe_save_json(path, data):
         try:
             shutil.copyfile(path, backup_path)
         except Exception as e:
-            print(f"[storage_utils] 备份 {path} 失败（不影响本次保存）：{e}")
+            logger.warning("备份 %s 失败（不影响本次保存）：%s", path, e)
 
     # 写入新内容（先写临时文件再替换，避免写到一半被中断导致主文件损坏）
     tmp_path = path + ".tmp"
@@ -38,7 +41,7 @@ def safe_save_json(path, data):
         os.replace(tmp_path, path)
         return True
     except Exception as e:
-        print(f"[storage_utils] 保存 {path} 失败：{e}")
+        logger.error("保存 %s 失败：%s", path, e)
         return False
 
 
@@ -54,18 +57,18 @@ def safe_load_json(path, default_factory):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"[storage_utils] 读取 {path} 失败：{e}，尝试备份文件...")
+        logger.info("读取 %s 失败：%s，尝试备份文件...", path, e)
 
     # 2. 尝试备份文件
     try:
         with open(backup_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            print(f"[storage_utils] 已从备份 {backup_path} 恢复数据。")
+            logger.warning("已从备份 %s 恢复数据。", backup_path)
             # 用恢复出来的数据覆盖损坏的主文件，避免下次还要走这条路径
             safe_save_json(path, data)
             return data
     except Exception as e:
-        print(f"[storage_utils] 读取备份 {backup_path} 也失败：{e}，使用默认值。")
+        logger.info("读取备份 %s 也失败：%s，使用默认值。", backup_path, e)
 
     # 3. 两者都失败，使用默认值，并立即落盘，确保下次能正常加载
     default_data = default_factory()

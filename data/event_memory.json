@@ -103,6 +103,38 @@
         "emotion": "touched",
         "impact": "increase_bond",
         "importance": 0.8,
+        "notified": true
+    },
+    {
+        "id": "23ebcbdc2cc948b2a41dce9fbd237fd6",
+        "event": "用户询问如何追求女生，并可能透露了自己有喜欢的人",
+        "emotion": "curious",
+        "impact": "increase_affinity",
+        "importance": 0.5,
         "notified": false
+    },
+    {
+        "id": "cc3ddd87d88d4100ab59ce8ae14a4f02",
+        "event": "用户表达了对贝斯在音乐中增添韵味的认可和欣赏。",
+        "emotion": "neutral",
+        "impact": "increase_affinity",
+        "importance": 0.5,
+        "notified": false
+    },
+    {
+        "id": "6e726689bdf34e5aaa28a8986bac6ba5",
+        "event": "AI分享了对歌曲《Don't Let Me Down》贝斯前奏的细腻感受，并问用户会不会嫌她太文艺。",
+        "emotion": "touched",
+        "impact": "increase_affinity",
+        "importance": 0.5,
+        "notified": false
+    },
+    {
+        "id": "de13d76799614001a207de056b340377",
+        "event": "AI解释打律的原因是律总是捉弄她，并担心被用户认为暴力",
+        "emotion": "sad",
+        "impact": "increase_bond",
+        "importance": 0.7,
+        "notified": true
     }
 ]
