@@ -1,69 +1,123 @@
 """
 Context Builder —— 统一组装"记忆相关"的上下文内容，喂给 chat.py 的 system prompt。
 
-之前的做法是 chat.py 直接调用 event_manager.load_recent_events，拼接成一段文字。
-现在多了两个新的记忆来源（语义检索 + 长期摘要），如果还是各自直接拼到 system prompt
-里、没有统一的长度控制，prompt 会随着记忆越积累越长，token成本和AI注意力分散的
-问题会越来越严重。
+这是 Hybrid Retrieval 的实现位置：不再是"先查语义、再查近期、简单拼接去重"，
+而是给每条事件算一个综合分数：
 
-这个模块负责：
-- 决定这一轮到底该带哪些记忆内容（近期重要事件 + 跟当前话题语义相关的事件 + 长期摘要）
-- 去重（同一条事件可能同时命中"近期"和"语义相关"，不能重复出现两次）
-- 控制总字符数上限，超出就优先保留更重要/更相关的内容，砍掉次要的
+    综合分 = 语义相似度 * SEMANTIC_WEIGHT
+           + 重要度     * IMPORTANCE_WEIGHT
+           + 时间衰减   * RECENCY_WEIGHT
+
+时间衰减用指数衰减模拟"记忆随时间变模糊"：刚发生的事件衰减分接近1，
+超过 RECENCY_HALF_LIFE_DAYS 后衰减到0.5，再往后继续指数下降，但不会衰减到0
+（很久以前的事依然有机会被想起来，只是权重很低）。
+
+没有 query_text 时（比如生成开场白），语义维度直接是0，
+权重会自动按比例分配给"重要度+时间衰减"这两项，不会让"没有语义信号"
+拖累整体排序的合理性。
+
+同时负责控制记忆上下文的总字符预算，避免随着记忆积累让 prompt 无限变长。
 """
 
-from event_manager import load_recent_events, get_semantically_relevant_events
+import datetime
+import math
+
+from event_manager import load_all_events
+from semantic_memory import compute_similarity_scores
 from long_term_memory import get_summary_text
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
 
+# Hybrid Retrieval 三个维度的权重
+SEMANTIC_WEIGHT = 0.4
+IMPORTANCE_WEIGHT = 0.35
+RECENCY_WEIGHT = 0.25
+
+# 时间衰减的半衰期：超过这么多天，衰减分降到0.5
+RECENCY_HALF_LIFE_DAYS = 7
+
 # 记忆上下文部分的总字符数预算，避免随着记忆积累让 prompt 无限变长
 DEFAULT_MAX_CHARS = 800
+
+# 综合分低于这个值的事件，即使凑数也不值得放进 prompt（避免噪音事件被硬塞进去）
+MIN_SCORE_TO_INCLUDE = 0.15
+
+
+def _recency_score(created_at_str, now):
+    """指数衰减：越久以前的事件，分数越低，但不会衰减到0"""
+    if not created_at_str:
+        return 0.3  # 没有时间信息的旧数据，给一个中等偏低的默认分，不至于完全被排除
+    try:
+        created_at = datetime.datetime.fromisoformat(created_at_str)
+    except Exception:
+        return 0.3
+
+    days_elapsed = max((now - created_at).total_seconds() / 86400, 0)
+    decay_rate = math.log(2) / RECENCY_HALF_LIFE_DAYS
+    return math.exp(-decay_rate * days_elapsed)
+
+
+def _rank_events(events, query_text):
+    """
+    给每条事件算综合分，按分数从高到低排序返回（不做数量截断，
+    截断交给调用方按字符预算来做）。
+    """
+    if not events:
+        return []
+
+    now = datetime.datetime.now()
+    semantic_scores = compute_similarity_scores(query_text, events) if query_text else {}
+
+    has_semantic_signal = bool(semantic_scores)
+    if has_semantic_signal:
+        w_semantic, w_importance, w_recency = SEMANTIC_WEIGHT, IMPORTANCE_WEIGHT, RECENCY_WEIGHT
+    else:
+        # 没有语义信号时，把语义的权重按比例分给重要度和时间衰减，
+        # 避免"权重总和变小"导致所有分数系统性偏低
+        total = IMPORTANCE_WEIGHT + RECENCY_WEIGHT
+        w_semantic = 0.0
+        w_importance = IMPORTANCE_WEIGHT / total
+        w_recency = RECENCY_WEIGHT / total
+
+    scored = []
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        semantic = semantic_scores.get(e.get("id"), 0.0)
+        importance = e.get("importance", 0.0)
+        recency = _recency_score(e.get("created_at"), now)
+
+        combined = semantic * w_semantic + importance * w_importance + recency * w_recency
+        if combined >= MIN_SCORE_TO_INCLUDE:
+            scored.append((combined, e))
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [e for _, e in scored]
 
 
 def build_memory_context(
     query_text=None,
-    recent_limit=5,
-    semantic_top_k=3,
     summary_limit=5,
     max_chars=DEFAULT_MAX_CHARS
 ):
     """
     组装记忆相关的上下文文本，供 chat.py 拼进 system prompt。
 
-    query_text: 当前这轮用户说的话，用来做语义检索（找出跟话题相关的过往事件）。
-                如果是 None（比如生成开场白/主动消息时还没有用户输入），就只用"近期事件"。
+    query_text: 当前这轮用户说的话，用来做语义检索。
+                如果是 None（比如生成开场白时还没有用户输入），
+                综合评分会自动退化为只用"重要度+时间衰减"两个维度。
 
     返回一个 dict：
         {
-            "event_memory_hint": "...",      # 近期+语义相关的事件，去重后的文字
+            "event_memory_hint": "...",      # 按综合分排序、控制过预算的事件文字
             "long_term_summary_hint": "..."   # 长期摘要文字
         }
     """
-    recent_events = load_recent_events(limit=recent_limit, min_importance=0.5)
+    all_events = load_all_events()
+    ranked_events = _rank_events(all_events, query_text)
 
-    semantic_events = []
-    if query_text:
-        try:
-            semantic_events = get_semantically_relevant_events(query_text, top_k=semantic_top_k)
-        except Exception as e:
-            logger.warning("语义检索出错（已跳过，只使用近期事件）：%s", e)
-            semantic_events = []
-
-    # 去重：同一条事件可能同时出现在"近期"和"语义相关"里，按 id 去重，
-    # 语义相关的事件排在前面（更贴合当前话题，优先级更高）
-    seen_ids = set()
-    merged_events = []
-    for e in semantic_events + recent_events:
-        event_id = e.get("id")
-        if event_id and event_id in seen_ids:
-            continue
-        if event_id:
-            seen_ids.add(event_id)
-        merged_events.append(e)
-
-    event_memory_hint = _build_event_hint_with_budget(merged_events, max_chars)
+    event_memory_hint = _build_event_hint_with_budget(ranked_events, max_chars)
 
     summary_text = get_summary_text(limit=summary_limit)
     long_term_summary_hint = summary_text if summary_text else "（暂时没有需要回顾的长期记忆）"
@@ -75,7 +129,7 @@ def build_memory_context(
 
 
 def _build_event_hint_with_budget(events, max_chars):
-    """把事件列表拼成文字，超过字符预算就停止添加（保留前面更重要/更相关的）"""
+    """把按综合分排好序的事件列表拼成文字，超过字符预算就停止添加（保留分数更高的）"""
     if not events:
         return "（暂时没有特别值得记住的事情）"
 

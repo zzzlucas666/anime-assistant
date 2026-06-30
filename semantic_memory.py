@@ -95,3 +95,34 @@ def find_semantically_relevant(query_text, candidates, top_k=3, min_similarity=0
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [event for _, event in scored[:top_k]]
+
+
+def compute_similarity_scores(query_text, candidates):
+    """
+    计算 query_text 跟每条候选事件的语义相似度，返回 {event_id: similarity} 字典。
+
+    跟 find_semantically_relevant 的区别：这个函数不做 top_k 截断、不做阈值过滤，
+    单纯把"每条事件的语义相似度"算出来，交给调用方（比如 context_builder 的
+    Hybrid Retrieval）跟其他维度（重要度、时间衰减）一起加权综合排序。
+
+    query_text 为空或模型加载失败时返回空字典，调用方应当将其视为
+    "所有事件的语义分数都是0"，不影响其他维度照常工作。
+    """
+    if not query_text:
+        return {}
+
+    query_vector = embed_text(query_text)
+    if query_vector is None:
+        return {}
+
+    scores = {}
+    for event in candidates:
+        if not isinstance(event, dict):
+            continue
+        event_id = event.get("id")
+        event_vector = event.get("embedding")
+        if not event_id or not event_vector:
+            continue
+        scores[event_id] = cosine_similarity(query_vector, event_vector)
+
+    return scores

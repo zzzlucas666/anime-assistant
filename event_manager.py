@@ -1,6 +1,7 @@
 from openai import OpenAI
 import json
 import uuid
+import datetime
 from Storage_utils import safe_load_json, safe_save_json
 from logger_utils import get_logger
 from semantic_memory import embed_text, find_semantically_relevant
@@ -47,11 +48,19 @@ def extract_event(api_key, model, user_message, ai_reply):
 
 {{
   "is_event": true 或 false,
-  "event": "用一句话概括这件事（如果 is_event 为 false，留空字符串）",
+  "event": "用1-2句话具体描述这件事（如果 is_event 为 false，留空字符串）",
   "emotion": "这件事对应的情绪标签，例如 happy / curious / sad / touched / neutral",
   "impact": "increase_bond 或 increase_affinity 或 none",
   "importance": 0.0到1.0之间的数字，表示这件事的重要程度
 }}
+
+关于 "event" 字段的写法要求（很重要，影响后续能否被正确检索到）：
+- 不要用"用户提到/表达了xxx"这种空洞的固定句式，要把具体内容写清楚
+- 包含具体的人、事、物、时间等细节，让这句话本身就能传达完整信息
+- 反例（太空洞）："用户提到下周要考试"
+- 正例（够具体）："Lucas说他下周三有一场很重要的数学考试，感到有点紧张，希望考好"
+- 反例（太空洞）："用户表达了对某事的喜好"
+- 正例（够具体）："Lucas说他很喜欢摇滚乐，尤其喜欢一些节奏强烈的乐队"
 
 判断标准：
 - increase_bond：能显著增进感情的事件（用户表达关心、分享心事、确认情感等），importance 通常 >= 0.7
@@ -98,6 +107,8 @@ AI的回复：
         "impact": result.get("impact", "none"),
         "importance": result.get("importance", 0.3),
         "notified": False,
+        # 创建时间，供 Hybrid Retrieval 计算"时间衰减"分数用
+        "created_at": datetime.datetime.now().isoformat(),
         # 语义检索用的向量。embed_text 失败时返回 None，
         # find_semantically_relevant 会自动跳过没有向量的事件，不影响其他功能。
         "embedding": embed_text(event_text) if event_text else None
@@ -111,6 +122,14 @@ def save_event(event):
     data = safe_load_json(EVENT_PATH, default_events)
     data.append(event)
     safe_save_json(EVENT_PATH, data)
+
+
+def load_all_events():
+    """
+    读取全部事件（不做任何过滤），供 context_builder 的 Hybrid Retrieval
+    自己综合语义/重要度/时间衰减打分排序。
+    """
+    return safe_load_json(EVENT_PATH, default_events)
 
 
 def load_recent_events(limit=5, min_importance=0.5):
