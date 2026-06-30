@@ -3,6 +3,7 @@ import json
 import uuid
 from Storage_utils import safe_load_json, safe_save_json
 from logger_utils import get_logger
+from semantic_memory import embed_text, find_semantically_relevant
 
 logger = get_logger(__name__)
 
@@ -88,13 +89,18 @@ AI的回复：
     if not result.get("is_event"):
         return None
 
+    event_text = result.get("event", "")
+
     return {
         "id": uuid.uuid4().hex,
-        "event": result.get("event", ""),
+        "event": event_text,
         "emotion": result.get("emotion", "neutral"),
         "impact": result.get("impact", "none"),
         "importance": result.get("importance", 0.3),
-        "notified": False
+        "notified": False,
+        # 语义检索用的向量。embed_text 失败时返回 None，
+        # find_semantically_relevant 会自动跳过没有向量的事件，不影响其他功能。
+        "embedding": embed_text(event_text) if event_text else None
     }
 
 
@@ -152,3 +158,24 @@ def mark_event_notified(event_id):
 
     if changed:
         safe_save_json(EVENT_PATH, data)
+
+
+def get_semantically_relevant_events(query_text, top_k=3, min_importance=0.0):
+    """
+    按语义相关性（而不是时间顺序）找出跟 query_text 最相关的过往事件。
+    比如用户现在在聊"考试"，即使这是几天前提到的事，只要语义相关
+    就能被检索到，而不需要它恰好出现在"最近几条"里。
+
+    语义检索失败（模型没装好、向量缺失等）会安全地返回空列表，
+    不影响调用方继续走"按时间"的兜底逻辑。
+    """
+    if not query_text:
+        return []
+
+    data = safe_load_json(EVENT_PATH, default_events)
+    candidates = [
+        e for e in data
+        if isinstance(e, dict) and e.get("importance", 0) >= min_importance
+    ]
+
+    return find_semantically_relevant(query_text, candidates, top_k=top_k)

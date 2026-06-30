@@ -1,6 +1,6 @@
 from openai import OpenAI
 import json
-from event_manager import load_recent_events
+from context_builder import build_memory_context
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -40,26 +40,21 @@ def build_relationship_hint(relationship):
     return "\n".join(hints)
 
 
-def build_event_memory_hint(events):
-    """把近期重要事件整理成一段提示文字，供 system prompt 使用"""
-    if not events:
-        return "（暂时没有特别值得记住的事情）"
-
-    lines = []
-    for e in events:
-        desc = e.get("event", "")
-        if desc:
-            lines.append(f"- {desc}")
-    return "\n".join(lines) if lines else "（暂时没有特别值得记住的事情）"
-
-
-def build_system_prompt(context):
+def build_system_prompt(context, query_text=None):
+    """
+    query_text: 当前这轮用户说的话，传给 context_builder 做语义检索，
+                找出跟当前话题相关的过往事件。生成开场白/主动消息时可能没有
+                明确的"用户当前消息"，传 None 也没问题（退化为只用近期事件）。
+    """
     persona = load_persona()
     profile = context["profile"]
     emotion = context["emotion"]
     relationship = context["relationship"]
-    recent_events = load_recent_events(limit=5, min_importance=0.5)
-    event_memory_hint = build_event_memory_hint(recent_events)
+
+    memory_context = build_memory_context(query_text=query_text)
+    event_memory_hint = memory_context["event_memory_hint"]
+    long_term_summary_hint = memory_context["long_term_summary_hint"]
+
     return f"""
 你现在扮演的角色是：{persona['name']}。
 
@@ -101,6 +96,10 @@ def build_system_prompt(context):
 # 【近期值得记住的事情】
 {event_memory_hint}
 （如果合适，可以自然地提起上面这些事情，让对方感觉到你真的记得，但不要每次都刻意提，更不要逐条复述）
+
+# 【更早之前的长期记忆摘要】
+{long_term_summary_hint}
+（这是很久以前聊过的内容的概括，印象比较模糊，不要假装记得很清楚的细节，只在话题自然相关时模糊地提一下）
 
 # 【核心行为规则】
 - 日常对话中提到自己时，只用“我”，绝对不要主动说出“澪酱”或“秋山澪”这个名字
@@ -161,9 +160,18 @@ FALLBACK_REPLIES = [
 ]
 
 
+def _extract_latest_user_message(messages):
+    """从消息列表里取出最后一条 role=user 的内容，用作语义检索的查询文本"""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return msg.get("content")
+    return None
+
+
 def _create_stream(messages, context):
     """单次创建一个流式请求，失败时直接抛出异常，由上层决定是否重试"""
-    system_prompt = build_system_prompt(context)
+    query_text = _extract_latest_user_message(messages)
+    system_prompt = build_system_prompt(context, query_text=query_text)
 
     client = OpenAI(
         api_key=context["config"]["api_key"],
@@ -305,7 +313,7 @@ def generate_proactive_message(context, reason_hint):
     """
     import random
 
-    system_prompt = build_system_prompt(context)
+    system_prompt = build_system_prompt(context, query_text=reason_hint)
 
     special_instruction = f"""
 

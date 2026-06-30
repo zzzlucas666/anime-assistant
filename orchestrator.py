@@ -26,6 +26,7 @@ from relationship_manager import update_relationship, save_relationship
 from profile_manager import save_profile
 from memory_manager import save_memory
 from interaction_tracker import update_last_interaction_time
+from long_term_memory import summarize_overflow
 
 
 def clean_reply(reply):
@@ -46,6 +47,8 @@ class ConversationOrchestrator:
         self.lock = lock if lock is not None else threading.Lock()
         # 给意图识别 + 资料提取并行用的小线程池，常驻即可，不用每轮新建
         self._executor = ThreadPoolExecutor(max_workers=2)
+        # 累积本轮（用户消息+助手消息）产生的溢出消息，finalize_turn 结束时统一交给长期摘要
+        self._pending_overflow = []
 
     @staticmethod
     def _clean_input(user_message):
@@ -120,7 +123,8 @@ class ConversationOrchestrator:
 
             # 记录用户消息
             self.conversation_history.append({"role": "user", "content": clean_message})
-            save_memory(self.conversation_history)
+            self.conversation_history, overflow = save_memory(self.conversation_history)
+            self._pending_overflow.extend(overflow)
 
             # 用户刚说了话，更新"上次互动时间"
             update_last_interaction_time()
@@ -193,9 +197,20 @@ class ConversationOrchestrator:
 
             # 记录助手消息
             self.conversation_history.append({"role": "assistant", "content": reply})
-            save_memory(self.conversation_history)
+            self.conversation_history, overflow = save_memory(self.conversation_history)
+            self._pending_overflow.extend(overflow)
 
             self.context.update(self.emotion, self.profile, self.relationship)
+
+        # 长期摘要是个AI调用，挪到锁外、回复已经显示给用户之后才做，
+        # 不阻塞下一轮输入，也不占着锁让 InitiativeEngine 白等。
+        if self._pending_overflow:
+            summarize_overflow(
+                self.config['api_key'],
+                self.config['model'],
+                self._pending_overflow
+            )
+            self._pending_overflow = []
 
         return reply
 

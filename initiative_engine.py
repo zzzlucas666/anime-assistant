@@ -28,6 +28,7 @@ from logger_utils import get_logger
 
 logger = get_logger(__name__)
 from memory_manager import save_memory
+from long_term_memory import summarize_overflow
 
 
 class InitiativeEngine:
@@ -115,11 +116,17 @@ class InitiativeEngine:
 
     def _record_message(self, message):
         self.conversation_history.append({"role": "assistant", "content": message})
-        save_memory(self.conversation_history)
+        self.conversation_history, overflow = save_memory(self.conversation_history)
         # 主动消息本身也算一次"互动"，避免下一次检查又立刻重复触发
         update_last_interaction_time()
         # 记录冷却状态（今日计数 + 上次触发时间）
         record_proactive_trigger()
+
+        # 注意：这里是在 self.lock 持有期间调用的AI请求，理论上不是最优实践
+        # （正常对话流程里我们都把AI调用挪到锁外做），但主动消息本身受冷却限制，
+        # 触发频率很低（几小时一次），这个权衡是可以接受的，不值得为此增加复杂度。
+        if overflow:
+            summarize_overflow(self.config['api_key'], self.config['model'], overflow)
 
     def check_and_trigger(self):
         """
