@@ -74,6 +74,7 @@ class InitiativeEngine:
         idle_threshold_minutes=30,
         proactive_min_interval_minutes=None,
         proactive_max_per_day=None,
+        on_message=None,
     ):
         self.config = config
         self.context = context
@@ -87,6 +88,10 @@ class InitiativeEngine:
         # 没传就用 proactive_tracker 里的默认值
         self.proactive_min_interval_minutes = proactive_min_interval_minutes
         self.proactive_max_per_day = proactive_max_per_day
+        # on_message：触发主动消息时的回调，签名为 on_message(message_text)。
+        # 控制台模式不传，run_loop 会退回直接 print；GUI模式传入一个会
+        # emit Qt信号的函数，让消息能安全地从后台线程传回界面主线程。
+        self.on_message = on_message
         self._stop_flag = threading.Event()
 
     # ------------------------------------------------------------------
@@ -265,7 +270,10 @@ class InitiativeEngine:
                 continue
 
             if message:
-                print(f"\n\n[Mio 突然找你说话]\nMio:\n{message}\n")
+                if self.on_message:
+                    self.on_message(message)
+                else:
+                    print(f"\n\n[Mio 突然找你说话]\nMio:\n{message}\n")
 
     def stop(self):
         self._stop_flag.set()

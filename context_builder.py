@@ -43,6 +43,14 @@ DEFAULT_MAX_CHARS = 800
 # 综合分低于这个值的事件，即使凑数也不值得放进 prompt（避免噪音事件被硬塞进去）
 MIN_SCORE_TO_INCLUDE = 0.15
 
+# 当确实执行了语义检索（有 query_text）时，单条事件的语义相似度如果低于这个值，
+# 直接排除，不允许"重要度+时间衰减"单独把它捞回来。
+# 这是为了修复一个真实出现过的问题：用户问一句具体的话（比如追问某个话题细节），
+# 但那个话题在记忆里根本没有真实记录，语义检索理应"查无结果"；如果没有这道门槛，
+# 一条完全不相关但"重要度高、发生得比较近"的旧记忆会被硬凑进 prompt，
+# AI会把这条不相关的记忆当成"该顺着聊的内容"，导致答非所问、前后矛盾。
+MIN_SEMANTIC_RELEVANCE_WHEN_QUERY = 0.25
+
 
 def _recency_score(created_at_str, now):
     """指数衰减：越久以前的事件，分数越低，但不会衰减到0"""
@@ -85,6 +93,13 @@ def _rank_events(events, query_text):
         if not isinstance(e, dict):
             continue
         semantic = semantic_scores.get(e.get("id"), 0.0)
+
+        # 关键修复：确实执行了语义检索（有query_text）时，如果这条事件跟
+        # 当前话题的语义相关度太低，说明它就是不相关，不能靠"重要度+时间"
+        # 硬凑分数把它捞进来——那样只会让AI被不相关的旧记忆带偏话题。
+        if has_semantic_signal and semantic < MIN_SEMANTIC_RELEVANCE_WHEN_QUERY:
+            continue
+
         importance = e.get("importance", 0.0)
         recency = _recency_score(e.get("created_at"), now)
 
