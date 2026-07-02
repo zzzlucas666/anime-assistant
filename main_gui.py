@@ -41,7 +41,7 @@ import threading
 import datetime
 
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
-from PySide6.QtGui import QFont, QTextCursor, QKeyEvent
+from PySide6.QtGui import QFont, QTextCursor, QKeyEvent, QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QLineEdit, QPushButton, QLabel
@@ -60,6 +60,21 @@ from logger_utils import get_logger
 
 logger = get_logger(__name__)
 
+# Live2D 相关依赖是可选的：装了 live2d-py + PyOpenGL 就显示角色立绘，
+# 没装也完全不影响聊天功能正常使用（优雅降级，而不是强制要求所有人
+# 都装这些额外依赖才能跑GUI）。
+try:
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+    from OpenGL.GL import glViewport
+    import live2d.v3 as live2d
+    LIVE2D_AVAILABLE = True
+except ImportError as e:
+    LIVE2D_AVAILABLE = False
+    logger.info("未检测到 live2d-py / PyOpenGL，将不显示角色立绘（不影响聊天功能）：%s", e)
+
+# ⚠️ 改成你本机实际的模型路径。留空字符串则不显示立绘。
+MODEL_JSON_PATH = r"C:\mio\mio\MIO.model3.json"
+
 # 主动聊天的可调参数，跟 main.py 保持一致
 CHECK_INTERVAL_MINUTES = 5
 IDLE_THRESHOLD_MINUTES = 30
@@ -71,7 +86,7 @@ BG_COLOR = "#0d0d0f"
 PANEL_COLOR = "#17171b"
 FG_COLOR = "#e8e6e3"
 USER_COLOR = "#d4a373"
-MIO_COLOR = "#08e62a"
+MIO_COLOR = "#07ed2e"
 SYSTEM_COLOR = "#6b6b70"
 ERROR_COLOR = "#e07a7a"
 BORDER_COLOR = "#26262b"
@@ -133,6 +148,62 @@ class ProactiveBridge(QObject):
     这个 QObject 所属线程（这里是GUI主线程）的槽函数里执行，不需要自己加锁。
     """
     message_received = Signal(str)
+
+
+if LIVE2D_AVAILABLE:
+    class Live2DWidget(QOpenGLWidget):
+        """
+        渲染 Live2D 角色立绘的画布。
+
+        加载逻辑是从独立验证脚本（test_live2d_load.py）里migrate过来的，
+        经过了非常仔细的排查才确认可用：关键是 live2d.glInit()（不是
+        live2d.glewInit()，那是个不存在的方法名，调用会抛AttributeError；
+        这个异常在Qt虚函数回调里如果不用try/except接住，会被静默吞掉，
+        表现得像是原生崩溃，实际只是个普通的Python异常）。
+        """
+
+        FRAME_INTERVAL_MS = 16  # 约60FPS的重绘间隔
+
+        def __init__(self, model_path):
+            super().__init__()
+            self.model_path = model_path
+            self.model = None
+            self.load_failed = False
+
+        def initializeGL(self):
+            try:
+                live2d.init()
+                live2d.glInit()
+
+                self.model = live2d.LAppModel()
+                self.model.LoadModelJson(self.model_path)
+                self.model.Resize(self.width(), self.height())
+                logger.info("Live2D 模型加载成功：%s", self.model_path)
+            except Exception as e:
+                logger.error("Live2D 模型加载失败，立绘区域将保持空白：%s", e)
+                self.load_failed = True
+                self.model = None
+
+            # 启动持续重绘的定时器，驱动呼吸/物理摆动等待机动画
+            self._frame_timer = QTimer(self)
+            self._frame_timer.timeout.connect(self.update)
+            self._frame_timer.start(self.FRAME_INTERVAL_MS)
+
+        def resizeGL(self, w, h):
+            glViewport(0, 0, w, h)
+            if self.model:
+                self.model.Resize(w, h)
+
+        def paintGL(self):
+            live2d.clearBuffer()
+            if self.model:
+                self.model.Update()
+                self.model.Draw()
+
+        def closeEvent(self, event):
+            if hasattr(self, "_frame_timer"):
+                self._frame_timer.stop()
+            super().closeEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -203,11 +274,20 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle(f"{self.config.get('assistant_name', 'Anime Assistant')}")
-        self.resize(760, 600)
+        self.resize(1040, 640) if (LIVE2D_AVAILABLE and MODEL_JSON_PATH) else self.resize(760, 600)
 
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+
+        # 顶层用左右分栏：左边聊天面板，右边Live2D立绘（如果可用的话）。
+        # 没装live2d-py或者没配置模型路径时，直接不创建右侧画布，
+        # 布局自动退化成原来的单栏聊天窗口，不影响正常使用。
+        outer_layout = QHBoxLayout(central)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        chat_panel = QWidget()
+        layout = QVBoxLayout(chat_panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
@@ -249,6 +329,16 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.send_button)
 
         layout.addLayout(input_row)
+
+        outer_layout.addWidget(chat_panel, stretch=3)
+
+        # Live2D 立绘画布：只在依赖装好且配置了模型路径时才创建，
+        # 加载失败也不会影响聊天面板正常工作（Live2DWidget内部有try/except兜底）。
+        self.live2d_widget = None
+        if LIVE2D_AVAILABLE and MODEL_JSON_PATH:
+            self.live2d_widget = Live2DWidget(MODEL_JSON_PATH)
+            self.live2d_widget.setMinimumWidth(280)
+            outer_layout.addWidget(self.live2d_widget, stretch=2)
 
         self._apply_terminal_style()
 
@@ -507,6 +597,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.cursor_timer.stop()
         self.typing_timer.stop()
+        if self.live2d_widget is not None and hasattr(self.live2d_widget, "_frame_timer"):
+            self.live2d_widget._frame_timer.stop()
         self.initiative_engine.stop()
         self.orchestrator.shutdown()
         if self._worker is not None and self._worker.isRunning():
@@ -515,6 +607,13 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if LIVE2D_AVAILABLE and MODEL_JSON_PATH:
+        # 显式请求 OpenGL 2.1（不涉及Profile概念），这是经过反复排查后
+        # 确认在这套环境下最稳妥的配置，必须在 QApplication 创建之前设置。
+        fmt = QSurfaceFormat()
+        fmt.setVersion(2, 1)
+        QSurfaceFormat.setDefaultFormat(fmt)
+
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
