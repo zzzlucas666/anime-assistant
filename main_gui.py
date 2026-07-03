@@ -57,6 +57,7 @@ from relationship_manager import load_relationship
 from orchestrator import ConversationOrchestrator
 from initiative_engine import InitiativeEngine
 from logger_utils import get_logger
+from character_controller import CharacterController
 
 logger = get_logger(__name__)
 
@@ -72,8 +73,9 @@ except ImportError as e:
     LIVE2D_AVAILABLE = False
     logger.info("未检测到 live2d-py / PyOpenGL，将不显示角色立绘（不影响聊天功能）：%s", e)
 
-# ⚠️ 改成你本机实际的模型路径。留空字符串则不显示立绘。
-MODEL_JSON_PATH = r"C:\mio\mio\MIO.model3.json"
+# Live2D 模型路径从 config/settings.json 的 live2d_model_path 读取。
+# 没配置时保留旧路径，避免升级后原本能显示的模型突然消失。
+DEFAULT_LIVE2D_MODEL_PATH = r"C:\mio\mio\MIO.model3.json"
 
 # 主动聊天的可调参数，跟 main.py 保持一致
 CHECK_INTERVAL_MINUTES = 5
@@ -169,6 +171,10 @@ if LIVE2D_AVAILABLE:
             self.model_path = model_path
             self.model = None
             self.load_failed = False
+            self.character_controller = None
+
+        def set_character_controller(self, controller):
+            self.character_controller = controller
 
         def initializeGL(self):
             try:
@@ -198,7 +204,51 @@ if LIVE2D_AVAILABLE:
             live2d.clearBuffer()
             if self.model:
                 self.model.Update()
+                if self.character_controller:
+                    self.character_controller.tick()
                 self.model.Draw()
+
+        def set_mouth_open(self, value):
+            if not self.model:
+                return
+            value = max(0.0, min(1.0, float(value)))
+            self._set_parameter("ParamMouthOpenY", value)
+
+        def set_expression(self, expression_name):
+            if not self.model or not expression_name:
+                return
+
+            for method_name in ("SetExpression", "setExpression"):
+                method = getattr(self.model, method_name, None)
+                if callable(method):
+                    try:
+                        method(expression_name)
+                        return
+                    except Exception as e:
+                        logger.debug("Live2D 表情切换失败 %s(%s)：%s", method_name, expression_name, e)
+
+        def _set_parameter(self, param_id, value):
+            candidates = (
+                ("SetParameterValue", (param_id, value)),
+                ("SetParameterValue", (param_id, value, 1.0)),
+                ("SetParameterValueById", (param_id, value)),
+                ("SetParameterValueById", (param_id, value, 1.0)),
+                ("AddParameterValue", (param_id, value)),
+                ("AddParameterValue", (param_id, value, 1.0)),
+                ("AddParameterValueById", (param_id, value)),
+                ("AddParameterValueById", (param_id, value, 1.0)),
+            )
+
+            for method_name, args in candidates:
+                method = getattr(self.model, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    method(*args)
+                    return True
+                except Exception:
+                    continue
+            return False
 
         def closeEvent(self, event):
             if hasattr(self, "_frame_timer"):
@@ -211,6 +261,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.config = load_config()
+        self.live2d_model_path = self.config.get("live2d_model_path", DEFAULT_LIVE2D_MODEL_PATH)
         conversation_history = load_memory()
         emotion = load_emotion()
         profile = load_profile()
@@ -263,6 +314,9 @@ class MainWindow(QMainWindow):
         self.typing_dot_count = 1
 
         self._build_ui()
+        self.character_controller = CharacterController(self.live2d_widget)
+        if self.live2d_widget is not None:
+            self.live2d_widget.set_character_controller(self.character_controller)
         self._start_timers()
         self._start_background_thread()
         self._show_greeting()
@@ -274,7 +328,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle(f"{self.config.get('assistant_name', 'Anime Assistant')}")
-        self.resize(1040, 640) if (LIVE2D_AVAILABLE and MODEL_JSON_PATH) else self.resize(760, 600)
+        self.resize(1040, 640) if (LIVE2D_AVAILABLE and self.live2d_model_path) else self.resize(760, 600)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -335,8 +389,8 @@ class MainWindow(QMainWindow):
         # Live2D 立绘画布：只在依赖装好且配置了模型路径时才创建，
         # 加载失败也不会影响聊天面板正常工作（Live2DWidget内部有try/except兜底）。
         self.live2d_widget = None
-        if LIVE2D_AVAILABLE and MODEL_JSON_PATH:
-            self.live2d_widget = Live2DWidget(MODEL_JSON_PATH)
+        if LIVE2D_AVAILABLE and self.live2d_model_path:
+            self.live2d_widget = Live2DWidget(self.live2d_model_path)
             self.live2d_widget.setMinimumWidth(280)
             outer_layout.addWidget(self.live2d_widget, stretch=2)
 
@@ -399,6 +453,8 @@ class MainWindow(QMainWindow):
 
         affection = self.relationship.get("affection", 0)
         familiarity = self.relationship.get("familiarity", 0)
+        if hasattr(self, "character_controller"):
+            self.character_controller.on_emotion_changed(self.emotion)
 
         # 标签用 SYSTEM_COLOR 弱化，数值用 FG_COLOR 强调，做出层级感，
         # 比之前"一整条同色字符串"更接近专业面板的排版方式。
@@ -530,8 +586,10 @@ class MainWindow(QMainWindow):
             self.is_streaming = True
             self.streaming_buffer = ""
             self.streaming_start_time = datetime.datetime.now().strftime("%H:%M")
+            self.character_controller.on_reply_started()
 
         self.streaming_buffer += chunk
+        self.character_controller.on_reply_chunk(chunk)
         self._render()
 
     def _on_turn_finished(self):
@@ -542,6 +600,7 @@ class MainWindow(QMainWindow):
         self.is_streaming = False
         self.is_typing = False
         self.streaming_buffer = ""
+        self.character_controller.on_reply_finished()
 
         self._render()
         self._update_status_bar()
@@ -555,6 +614,7 @@ class MainWindow(QMainWindow):
         self.is_streaming = False
         self.is_typing = False
         self.streaming_buffer = ""
+        self.character_controller.on_reply_finished()
         self.messages.append(self._new_message("system", "（出了点问题，请稍后再试）"))
         self._render()
 
@@ -607,7 +667,10 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    if LIVE2D_AVAILABLE and MODEL_JSON_PATH:
+    config = load_config()
+    live2d_model_path = config.get("live2d_model_path", DEFAULT_LIVE2D_MODEL_PATH)
+
+    if LIVE2D_AVAILABLE and live2d_model_path:
         # 显式请求 OpenGL 2.1（不涉及Profile概念），这是经过反复排查后
         # 确认在这套环境下最稳妥的配置，必须在 QApplication 创建之前设置。
         fmt = QSurfaceFormat()

@@ -1,5 +1,6 @@
 {
     "assistant_name": "Anime Assistant",
     "model": "deepseek-chat",
-    "api_key": "YOUR_API_KEY_HERE"
+    "api_key": "YOUR_API_KEY_HERE",
+    "live2d_model_path": "C:\\mio\\mio\\MIO.model3.json"
 }
