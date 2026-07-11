@@ -58,6 +58,7 @@ from orchestrator import ConversationOrchestrator
 from initiative_engine import InitiativeEngine
 from logger_utils import get_logger
 from character_controller import CharacterController
+from live2d_model_utils import load_live2d_model_metadata
 
 logger = get_logger(__name__)
 
@@ -76,6 +77,68 @@ except ImportError as e:
 # Live2D 模型路径从 config/settings.json 的 live2d_model_path 读取。
 # 没配置时保留旧路径，避免升级后原本能显示的模型突然消失。
 DEFAULT_LIVE2D_MODEL_PATH = r"C:\mio\mio\MIO.model3.json"
+
+# 当前 MIO 模型没有单独的 exp3 表情文件，所以先用参数预设做轻量表情。
+# 上一版数值太克制，在部分模型上几乎看不出来；这里改成更明显的默认效果。
+DEFAULT_LIVE2D_PARAMETER_MAP = {
+    "neutral": {
+        "ParamEyeLSmile": 0,
+        "ParamEyeRSmile": 0,
+        "ParamMouthForm": 0,
+        "ParamCheek": 0,
+        "ParamBrowLY": 0,
+        "ParamBrowRY": 0,
+        "ParamBrowLAngle": 0,
+        "ParamBrowRAngle": 0,
+    },
+    "happy": {
+        "ParamEyeLSmile": 1.0,
+        "ParamEyeRSmile": 1.0,
+        "ParamMouthForm": 1.0,
+        "ParamCheek": 0.8,
+        "ParamBrowLY": 0.35,
+        "ParamBrowRY": 0.35,
+        "ParamBrowLForm": 0.4,
+        "ParamBrowRForm": 0.4,
+    },
+    "sad": {
+        "ParamEyeLSmile": 0,
+        "ParamEyeRSmile": 0,
+        "ParamEyeLOpen": 0.65,
+        "ParamEyeROpen": 0.65,
+        "ParamMouthForm": -1.0,
+        "ParamCheek": 0,
+        "ParamBrowLY": -0.65,
+        "ParamBrowRY": -0.65,
+        "ParamBrowLAngle": -0.65,
+        "ParamBrowRAngle": 0.65,
+        "ParamAngleY": -4,
+    },
+    "shy": {
+        "ParamEyeLSmile": 0.75,
+        "ParamEyeRSmile": 0.75,
+        "ParamEyeLOpen": 0.75,
+        "ParamEyeROpen": 0.75,
+        "ParamMouthForm": 0.45,
+        "ParamCheek": 1.0,
+        "ParamBrowLY": 0.25,
+        "ParamBrowRY": 0.25,
+        "ParamAngleX": -5,
+        "ParamAngleY": -3,
+    },
+    "tired": {
+        "ParamEyeLOpen": 0.35,
+        "ParamEyeROpen": 0.35,
+        "ParamEyeLSmile": 0,
+        "ParamEyeRSmile": 0,
+        "ParamMouthForm": -0.55,
+        "ParamCheek": 0,
+        "ParamBrowLY": -0.45,
+        "ParamBrowRY": -0.45,
+        "ParamAngleY": -5,
+    },
+}
+DEFAULT_LIVE2D_EXPRESSION_INTENSITY = 1.0
 
 # 主动聊天的可调参数，跟 main.py 保持一致
 CHECK_INTERVAL_MINUTES = 5
@@ -110,6 +173,30 @@ MOOD_DISPLAY = {
 
 CURSOR_BLINK_INTERVAL_MS = 500
 TYPING_DOT_INTERVAL_MS = 450
+STREAM_RENDER_INTERVAL_MS = 33
+
+
+def merge_emotion_map(default_map, config_map):
+    """
+    合并默认情绪映射和配置映射。
+
+    配置里只需要写想调整的 mood 或参数；没写的部分继续沿用默认值，
+    这样不会因为 settings.json 少写几个字段就丢掉基础表情效果。
+    """
+    merged = {
+        mood: values.copy() if isinstance(values, dict) else values
+        for mood, values in default_map.items()
+    }
+    if not isinstance(config_map, dict):
+        return merged
+
+    for mood, values in config_map.items():
+        if isinstance(values, dict) and isinstance(merged.get(mood), dict):
+            merged[mood].update(values)
+        else:
+            merged[mood] = values
+
+    return merged
 
 
 class ChatWorker(QThread):
@@ -164,7 +251,7 @@ if LIVE2D_AVAILABLE:
         表现得像是原生崩溃，实际只是个普通的Python异常）。
         """
 
-        FRAME_INTERVAL_MS = 16  # 约60FPS的重绘间隔
+        FRAME_INTERVAL_MS = 33  # 约30FPS；聊天立绘不需要60FPS，低一点能让回复显示更轻快
 
         def __init__(self, model_path):
             super().__init__()
@@ -184,6 +271,8 @@ if LIVE2D_AVAILABLE:
                 self.model = live2d.LAppModel()
                 self.model.LoadModelJson(self.model_path)
                 self.model.Resize(self.width(), self.height())
+                if self.character_controller:
+                    self.character_controller.refresh_current_expression()
                 logger.info("Live2D 模型加载成功：%s", self.model_path)
             except Exception as e:
                 logger.error("Live2D 模型加载失败，立绘区域将保持空白：%s", e)
@@ -214,6 +303,16 @@ if LIVE2D_AVAILABLE:
             value = max(0.0, min(1.0, float(value)))
             self._set_parameter("ParamMouthOpenY", value)
 
+        def set_parameters(self, parameters):
+            if not self.model or not isinstance(parameters, dict):
+                return
+
+            for param_id, value in parameters.items():
+                try:
+                    self._set_parameter(param_id, float(value))
+                except (TypeError, ValueError):
+                    logger.debug("Live2D 参数值不是数字，已跳过：%s=%s", param_id, value)
+
         def set_expression(self, expression_name):
             if not self.model or not expression_name:
                 return
@@ -226,6 +325,19 @@ if LIVE2D_AVAILABLE:
                         return
                     except Exception as e:
                         logger.debug("Live2D 表情切换失败 %s(%s)：%s", method_name, expression_name, e)
+
+        def start_motion(self, motion_group, index=0, priority=3):
+            if not self.model or not motion_group:
+                return
+
+            method = getattr(self.model, "StartMotion", None)
+            if not callable(method):
+                return
+
+            try:
+                method(motion_group, index, priority)
+            except Exception as e:
+                logger.debug("Live2D 动作触发失败 StartMotion(%s)：%s", motion_group, e)
 
         def _set_parameter(self, param_id, value):
             candidates = (
@@ -262,6 +374,7 @@ class MainWindow(QMainWindow):
 
         self.config = load_config()
         self.live2d_model_path = self.config.get("live2d_model_path", DEFAULT_LIVE2D_MODEL_PATH)
+        self.live2d_metadata = load_live2d_model_metadata(self.live2d_model_path)
         conversation_history = load_memory()
         emotion = load_emotion()
         profile = load_profile()
@@ -308,13 +421,29 @@ class MainWindow(QMainWindow):
         self.streaming_buffer = ""
         self.streaming_start_time = ""
         self.cursor_visible = True
+        self._stream_render_pending = False
 
         # "正在输入"提示的状态
         self.is_typing = False
         self.typing_dot_count = 1
 
         self._build_ui()
-        self.character_controller = CharacterController(self.live2d_widget)
+        self.character_controller = CharacterController(
+            self.live2d_widget,
+            expression_map=self.config.get("live2d_expression_map", {}),
+            motion_map=self.config.get("live2d_motion_map", {}),
+            parameter_map=merge_emotion_map(
+                DEFAULT_LIVE2D_PARAMETER_MAP,
+                self.config.get("live2d_parameter_map", {}),
+            ),
+            expression_intensity=self.config.get(
+                "live2d_expression_intensity",
+                DEFAULT_LIVE2D_EXPRESSION_INTENSITY,
+            ),
+            available_expressions=self.live2d_metadata.get("expressions", []),
+            available_motion_groups=self.live2d_metadata.get("motion_groups", []),
+            available_parameters=self.live2d_metadata.get("parameters", []),
+        )
         if self.live2d_widget is not None:
             self.live2d_widget.set_character_controller(self.character_controller)
         self._start_timers()
@@ -441,6 +570,12 @@ class MainWindow(QMainWindow):
         self.typing_timer = QTimer(self)
         self.typing_timer.timeout.connect(self._on_typing_tick)
         self.typing_timer.start(TYPING_DOT_INTERVAL_MS)
+
+        # 流式回复可能一次吐很多小 chunk。这里把 GUI 重绘节流到约30FPS，
+        # 避免每个 chunk 都 setHtml()，跟 Live2D 绘制抢主线程时间。
+        self.stream_render_timer = QTimer(self)
+        self.stream_render_timer.setSingleShot(True)
+        self.stream_render_timer.timeout.connect(self._flush_stream_render)
 
     # ------------------------------------------------------------------
     # 状态栏
@@ -590,9 +725,10 @@ class MainWindow(QMainWindow):
 
         self.streaming_buffer += chunk
         self.character_controller.on_reply_chunk(chunk)
-        self._render()
+        self._schedule_stream_render()
 
     def _on_turn_finished(self):
+        self._flush_stream_render()
         # 把流式过程中的临时气泡固化成正式的一条消息
         if self.streaming_buffer:
             self.messages.append(self._new_message("mio", self.streaming_buffer))
@@ -644,6 +780,20 @@ class MainWindow(QMainWindow):
         self.typing_dot_count = (self.typing_dot_count % 3) + 1
         self._render()
 
+    def _schedule_stream_render(self):
+        if self._stream_render_pending:
+            return
+        self._stream_render_pending = True
+        self.stream_render_timer.start(STREAM_RENDER_INTERVAL_MS)
+
+    def _flush_stream_render(self):
+        if not self._stream_render_pending and not self.is_streaming:
+            return
+        self._stream_render_pending = False
+        if self.stream_render_timer.isActive():
+            self.stream_render_timer.stop()
+        self._render()
+
     # ------------------------------------------------------------------
     # 后台线程 + 关闭收尾
     # ------------------------------------------------------------------
@@ -657,6 +807,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.cursor_timer.stop()
         self.typing_timer.stop()
+        self.stream_render_timer.stop()
         if self.live2d_widget is not None and hasattr(self.live2d_widget, "_frame_timer"):
             self.live2d_widget._frame_timer.stop()
         self.initiative_engine.stop()

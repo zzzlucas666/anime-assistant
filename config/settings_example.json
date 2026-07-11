@@ -2,5 +2,78 @@
     "assistant_name": "Anime Assistant",
     "model": "deepseek-chat",
     "api_key": "YOUR_API_KEY_HERE",
-    "live2d_model_path": "C:\\mio\\mio\\MIO.model3.json"
+    "live2d_model_path": "C:\\mio\\mio\\MIO.model3.json",
+    "live2d_expression_intensity": 1.0,
+    "live2d_expression_map": {
+        "happy": "",
+        "sad": "",
+        "shy": "",
+        "tired": "",
+        "neutral": ""
+    },
+    "live2d_motion_map": {
+        "happy": "",
+        "sad": "",
+        "shy": "",
+        "tired": "",
+        "neutral": ""
+    },
+    "live2d_parameter_map": {
+        "neutral": {
+            "ParamEyeLSmile": 0,
+            "ParamEyeRSmile": 0,
+            "ParamMouthForm": 0,
+            "ParamCheek": 0,
+            "ParamBrowLY": 0,
+            "ParamBrowRY": 0,
+            "ParamBrowLAngle": 0,
+            "ParamBrowRAngle": 0
+        },
+        "happy": {
+            "ParamEyeLSmile": 1.0,
+            "ParamEyeRSmile": 1.0,
+            "ParamMouthForm": 1.0,
+            "ParamCheek": 0.8,
+            "ParamBrowLY": 0.35,
+            "ParamBrowRY": 0.35,
+            "ParamBrowLForm": 0.4,
+            "ParamBrowRForm": 0.4
+        },
+        "sad": {
+            "ParamEyeLSmile": 0,
+            "ParamEyeRSmile": 0,
+            "ParamEyeLOpen": 0.65,
+            "ParamEyeROpen": 0.65,
+            "ParamMouthForm": -1.0,
+            "ParamCheek": 0,
+            "ParamBrowLY": -0.65,
+            "ParamBrowRY": -0.65,
+            "ParamBrowLAngle": -0.65,
+            "ParamBrowRAngle": 0.65,
+            "ParamAngleY": -4
+        },
+        "shy": {
+            "ParamEyeLSmile": 0.75,
+            "ParamEyeRSmile": 0.75,
+            "ParamEyeLOpen": 0.75,
+            "ParamEyeROpen": 0.75,
+            "ParamMouthForm": 0.45,
+            "ParamCheek": 1.0,
+            "ParamBrowLY": 0.25,
+            "ParamBrowRY": 0.25,
+            "ParamAngleX": -5,
+            "ParamAngleY": -3
+        },
+        "tired": {
+            "ParamEyeLOpen": 0.35,
+            "ParamEyeROpen": 0.35,
+            "ParamEyeLSmile": 0,
+            "ParamEyeRSmile": 0,
+            "ParamMouthForm": -0.55,
+            "ParamCheek": 0,
+            "ParamBrowLY": -0.45,
+            "ParamBrowRY": -0.45,
+            "ParamAngleY": -5
+        }
+    }
 }

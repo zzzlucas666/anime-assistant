@@ -59,6 +59,21 @@ class ConversationOrchestrator:
             .strip()
         )
 
+    @staticmethod
+    def _looks_like_profile_update(clean_message):
+        """
+        只有用户明显在更新个人资料时，才调用 profile_extractor。
+
+        之前每轮普通聊天都会额外打一条“资料提取”AI请求；虽然它跟意图识别并行，
+        但仍然会增加网络/CPU压力。这里先用保守关键词挡一下，不影响常见资料更新。
+        """
+        profile_keywords = (
+            "我喜欢", "我爱", "我讨厌", "我不喜欢", "我反感",
+            "我叫", "我的名字是", "我的名字叫", "我名字是", "我名字叫",
+            "你可以叫我", "以后叫我", "叫我", "我的昵称",
+        )
+        return any(keyword in clean_message for keyword in profile_keywords)
+
     def _apply_profile_update(self, intent, confidence, profile_info):
         """根据 profile_extractor 的结果更新 profile（如果置信度够高）"""
         action = profile_info.get("action")
@@ -93,7 +108,8 @@ class ConversationOrchestrator:
         """
         clean_message = self._clean_input(user_message)
 
-        # detect_intent 和 extract_profile_info 互不依赖，并行执行省一次往返延迟
+        # detect_intent 和 extract_profile_info 互不依赖，并行执行省一次往返延迟。
+        # 但普通聊天没必要每轮都做资料提取，先用关键词过滤，减少一部分前置AI调用。
         intent_future = self._executor.submit(
             detect_intent,
             self.config['api_key'],
@@ -102,15 +118,17 @@ class ConversationOrchestrator:
             self.emotion,
             self.profile
         )
-        profile_future = self._executor.submit(
-            extract_profile_info,
-            self.config['api_key'],
-            self.config['model'],
-            clean_message
-        )
+        profile_future = None
+        if self._looks_like_profile_update(clean_message):
+            profile_future = self._executor.submit(
+                extract_profile_info,
+                self.config['api_key'],
+                self.config['model'],
+                clean_message
+            )
 
         intent_result = intent_future.result()
-        profile_info = profile_future.result()
+        profile_info = profile_future.result() if profile_future else {"action": "none", "value": ""}
 
         intent = intent_result.get("intent", "")
         confidence = intent_result.get("confidence", 0)
