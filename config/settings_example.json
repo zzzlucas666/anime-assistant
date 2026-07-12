@@ -8,7 +8,7 @@
     "proactive_min_interval_minutes": 120,
     "proactive_max_per_day": 3,
     "live2d_model_path": "",
-    "live2d_expression_intensity": 1.0,
+    "live2d_expression_intensity": 1.25,
     "live2d_expression_map": {
         "happy": "",
         "sad": "",
@@ -35,50 +35,48 @@
             "ParamBrowRAngle": 0
         },
         "happy": {
-            "ParamEyeLSmile": 1.0,
-            "ParamEyeRSmile": 1.0,
-            "ParamMouthForm": 1.0,
-            "ParamCheek": 0.8,
-            "ParamBrowLY": 0.35,
-            "ParamBrowRY": 0.35,
-            "ParamBrowLForm": 0.4,
-            "ParamBrowRForm": 0.4
+            "ParamEyeLSmile": 0.65,
+            "ParamEyeRSmile": 0.65,
+            "ParamEyeLOpen": 0.92,
+            "ParamEyeROpen": 0.92,
+            "ParamMouthForm": 0.65,
+            "ParamCheek": 0.4,
+            "ParamBrowLY": 0.05,
+            "ParamBrowRY": 0.05
         },
         "sad": {
             "ParamEyeLSmile": 0,
             "ParamEyeRSmile": 0,
-            "ParamEyeLOpen": 0.65,
-            "ParamEyeROpen": 0.65,
-            "ParamMouthForm": -1.0,
+            "ParamEyeLOpen": 0.78,
+            "ParamEyeROpen": 0.78,
+            "ParamMouthForm": -0.35,
             "ParamCheek": 0,
-            "ParamBrowLY": -0.65,
-            "ParamBrowRY": -0.65,
-            "ParamBrowLAngle": -0.65,
-            "ParamBrowRAngle": 0.65,
-            "ParamAngleY": -4
+            "ParamBrowLY": -0.12,
+            "ParamBrowRY": -0.12,
+            "ParamAngleY": -2.5
         },
         "shy": {
-            "ParamEyeLSmile": 0.75,
-            "ParamEyeRSmile": 0.75,
-            "ParamEyeLOpen": 0.75,
-            "ParamEyeROpen": 0.75,
-            "ParamMouthForm": 0.45,
-            "ParamCheek": 1.0,
-            "ParamBrowLY": 0.25,
-            "ParamBrowRY": 0.25,
-            "ParamAngleX": -5,
-            "ParamAngleY": -3
+            "ParamEyeLSmile": 0.35,
+            "ParamEyeRSmile": 0.35,
+            "ParamEyeLOpen": 0.88,
+            "ParamEyeROpen": 0.88,
+            "ParamMouthForm": 0.25,
+            "ParamCheek": 0.75,
+            "ParamBrowLY": 0.03,
+            "ParamBrowRY": 0.03,
+            "ParamAngleX": -3.5,
+            "ParamAngleY": -2
         },
         "tired": {
-            "ParamEyeLOpen": 0.35,
-            "ParamEyeROpen": 0.35,
+            "ParamEyeLOpen": 0.58,
+            "ParamEyeROpen": 0.58,
             "ParamEyeLSmile": 0,
             "ParamEyeRSmile": 0,
-            "ParamMouthForm": -0.55,
+            "ParamMouthForm": -0.15,
             "ParamCheek": 0,
-            "ParamBrowLY": -0.45,
-            "ParamBrowRY": -0.45,
-            "ParamAngleY": -5
+            "ParamBrowLY": -0.08,
+            "ParamBrowRY": -0.08,
+            "ParamAngleY": -3
         }
     }
 }

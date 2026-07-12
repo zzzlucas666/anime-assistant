@@ -216,7 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-config/settings.json
+config/settings.json*
 conversation_history.json
 
 # Anime Assistant local runtime state

@@ -8,7 +8,11 @@ from unittest.mock import patch
 from ai.client import DEFAULT_BASE_URL, create_ai_client
 from ai.chat import get_user_display_name, load_persona
 from app_paths import APP_ROOT, CONFIG_DIR, DATA_DIR, resolve_project_path
-from config_loader import DEFAULT_CONFIG, load_config
+from config_loader import (
+    DEFAULT_CONFIG,
+    load_config,
+    save_live2d_parameter_preset,
+)
 from live2d_model_utils import resolve_live2d_model_path
 
 
@@ -44,6 +48,31 @@ class ConfigurationAndPathTests(unittest.TestCase):
         self.assertEqual(loaded["base_url"], DEFAULT_CONFIG["base_url"])
         self.assertEqual(loaded["live2d_model_path"], "")
         self.assertEqual(loaded["proactive_max_per_day"], 7)
+
+    def test_live2d_parameter_preset_is_saved_without_losing_config(self):
+        config = {
+            "api_key": "secret-key",
+            "model": "test-model",
+            "assistant_name": "Mio",
+            "live2d_parameter_map": {},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "settings.json"
+            saved = save_live2d_parameter_preset(
+                config,
+                "sad",
+                {"ParamMouthForm": -0.27, "invalid": "skip-me"},
+                config_path,
+            )
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(saved)
+        self.assertEqual(persisted["api_key"], "secret-key")
+        self.assertEqual(
+            persisted["live2d_parameter_map"]["sad"],
+            {"ParamMouthForm": -0.27},
+        )
 
     def test_persona_load_does_not_depend_on_current_working_directory(self):
         previous_cwd = Path.cwd()
