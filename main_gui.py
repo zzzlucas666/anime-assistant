@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from context_manager import ContextManager
-from config_loader import load_config
+from config_loader import load_config, save_live2d_parameter_preset
 from ai.chat import generate_greeting
 from memory_manager import load_memory
 from emotion_manager import load_emotion
@@ -59,6 +59,7 @@ from initiative_engine import InitiativeEngine
 from logger_utils import get_logger
 from character_controller import CharacterController
 from live2d_model_utils import load_live2d_model_metadata, resolve_live2d_model_path
+from live2d_parameter_tuner import Live2DParameterTuner
 from semantic_memory import warmup_model_async
 
 logger = get_logger(__name__)
@@ -75,8 +76,9 @@ except ImportError as e:
     LIVE2D_AVAILABLE = False
     logger.info("未检测到 live2d-py / PyOpenGL，将不显示角色立绘（不影响聊天功能）：%s", e)
 
-# 当前 MIO 模型没有单独的 exp3 表情文件，所以先用参数预设做轻量表情。
-# 上一版数值太克制，在部分模型上几乎看不出来；这里改成更明显的默认效果。
+# 当前 MIO 模型没有单独的 exp3 表情文件，所以使用参数预设做轻量表情。
+# 这些数值按 MIO 实际截图校准：它的眉毛角度/形变非常敏感，过大的组合会
+# 形成怒眉；嘴型也适合用较小偏移，再由眼睛、脸颊和姿态共同表达情绪。
 DEFAULT_LIVE2D_PARAMETER_MAP = {
     "neutral": {
         "ParamEyeLSmile": 0,
@@ -89,53 +91,51 @@ DEFAULT_LIVE2D_PARAMETER_MAP = {
         "ParamBrowRAngle": 0,
     },
     "happy": {
-        "ParamEyeLSmile": 1.0,
-        "ParamEyeRSmile": 1.0,
-        "ParamMouthForm": 1.0,
-        "ParamCheek": 0.8,
-        "ParamBrowLY": 0.35,
-        "ParamBrowRY": 0.35,
-        "ParamBrowLForm": 0.4,
-        "ParamBrowRForm": 0.4,
+        "ParamEyeLSmile": 0.65,
+        "ParamEyeRSmile": 0.65,
+        "ParamEyeLOpen": 0.92,
+        "ParamEyeROpen": 0.92,
+        "ParamMouthForm": 0.65,
+        "ParamCheek": 0.4,
+        "ParamBrowLY": 0.05,
+        "ParamBrowRY": 0.05,
     },
     "sad": {
         "ParamEyeLSmile": 0,
         "ParamEyeRSmile": 0,
-        "ParamEyeLOpen": 0.65,
-        "ParamEyeROpen": 0.65,
-        "ParamMouthForm": -1.0,
+        "ParamEyeLOpen": 0.78,
+        "ParamEyeROpen": 0.78,
+        "ParamMouthForm": -0.35,
         "ParamCheek": 0,
-        "ParamBrowLY": -0.65,
-        "ParamBrowRY": -0.65,
-        "ParamBrowLAngle": -0.65,
-        "ParamBrowRAngle": 0.65,
-        "ParamAngleY": -4,
+        "ParamBrowLY": -0.12,
+        "ParamBrowRY": -0.12,
+        "ParamAngleY": -2.5,
     },
     "shy": {
-        "ParamEyeLSmile": 0.75,
-        "ParamEyeRSmile": 0.75,
-        "ParamEyeLOpen": 0.75,
-        "ParamEyeROpen": 0.75,
-        "ParamMouthForm": 0.45,
-        "ParamCheek": 1.0,
-        "ParamBrowLY": 0.25,
-        "ParamBrowRY": 0.25,
-        "ParamAngleX": -5,
-        "ParamAngleY": -3,
+        "ParamEyeLSmile": 0.35,
+        "ParamEyeRSmile": 0.35,
+        "ParamEyeLOpen": 0.88,
+        "ParamEyeROpen": 0.88,
+        "ParamMouthForm": 0.25,
+        "ParamCheek": 0.75,
+        "ParamBrowLY": 0.03,
+        "ParamBrowRY": 0.03,
+        "ParamAngleX": -3.5,
+        "ParamAngleY": -2,
     },
     "tired": {
-        "ParamEyeLOpen": 0.35,
-        "ParamEyeROpen": 0.35,
+        "ParamEyeLOpen": 0.58,
+        "ParamEyeROpen": 0.58,
         "ParamEyeLSmile": 0,
         "ParamEyeRSmile": 0,
-        "ParamMouthForm": -0.55,
+        "ParamMouthForm": -0.15,
         "ParamCheek": 0,
-        "ParamBrowLY": -0.45,
-        "ParamBrowRY": -0.45,
-        "ParamAngleY": -5,
+        "ParamBrowLY": -0.08,
+        "ParamBrowRY": -0.08,
+        "ParamAngleY": -3,
     },
 }
-DEFAULT_LIVE2D_EXPRESSION_INTENSITY = 1.0
+DEFAULT_LIVE2D_EXPRESSION_INTENSITY = 1.25
 
 # 配色：跳出"黑客终端绿"的俗套，改用低饱和度的暖灰底 + 鼠尾草绿/暖棕调，更显克制精致
 BG_COLOR = "#0d0d0f"
@@ -490,6 +490,12 @@ class MainWindow(QMainWindow):
             status_row.addWidget(lbl)
 
         status_row.addStretch(1)
+        self.expression_tuner_button = None
+        if LIVE2D_AVAILABLE and self.live2d_model_path:
+            self.expression_tuner_button = QPushButton("调表情")
+            self.expression_tuner_button.setToolTip("实时调整并保存 Live2D 情绪参数")
+            self.expression_tuner_button.clicked.connect(self._open_expression_tuner)
+            status_row.addWidget(self.expression_tuner_button)
         layout.addLayout(status_row)
 
         self.chat_log = QTextEdit()
@@ -577,6 +583,26 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 状态栏
     # ------------------------------------------------------------------
+
+    def _open_expression_tuner(self):
+        if self.live2d_widget is None or not hasattr(self, "character_controller"):
+            return
+
+        dialog = Live2DParameterTuner(
+            controller=self.character_controller,
+            parameter_map=self.character_controller.parameter_map,
+            recommended_map=DEFAULT_LIVE2D_PARAMETER_MAP,
+            current_mood=self.emotion.get("mood", "neutral"),
+            save_callback=self._save_expression_preset,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _save_expression_preset(self, mood, parameters):
+        saved = save_live2d_parameter_preset(self.config, mood, parameters)
+        if not saved:
+            logger.error("保存 Live2D 情绪参数失败：mood=%s", mood)
+        return saved
 
     def _update_status_bar(self):
         mood = self.emotion.get("mood", "neutral")
