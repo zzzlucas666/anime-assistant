@@ -3,9 +3,11 @@
 """
 
 import datetime
+from app_paths import DATA_DIR
+from data_models import normalize_interaction_state
 from Storage_utils import safe_load_json, safe_save_json
 
-INTERACTION_PATH = "data/interaction_state.json"
+INTERACTION_PATH = str(DATA_DIR / "interaction_state.json")
 
 
 def default_interaction():
@@ -14,7 +16,10 @@ def default_interaction():
 
 def load_last_interaction_time():
     """返回 datetime 对象，如果从未记录过则返回 None"""
-    data = safe_load_json(INTERACTION_PATH, default_interaction)
+    raw_data = safe_load_json(INTERACTION_PATH, default_interaction)
+    data = normalize_interaction_state(raw_data)
+    if data != raw_data:
+        safe_save_json(INTERACTION_PATH, data)
     ts = data.get("last_interaction_time")
     if not ts:
         return None

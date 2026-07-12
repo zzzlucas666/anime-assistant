@@ -21,6 +21,7 @@ Context Builder —— 统一组装"记忆相关"的上下文内容，喂给 cha
 
 import datetime
 import math
+import time
 
 from event_manager import load_all_events
 from semantic_memory import compute_similarity_scores
@@ -129,18 +130,29 @@ def build_memory_context(
             "long_term_summary_hint": "..."   # 长期摘要文字
         }
     """
+    started_at = time.perf_counter()
     all_events = load_all_events()
+    loaded_at = time.perf_counter()
     ranked_events = _rank_events(all_events, query_text)
+    ranked_at = time.perf_counter()
 
     event_memory_hint = _build_event_hint_with_budget(ranked_events, max_chars)
 
     summary_text = get_summary_text(limit=summary_limit)
     long_term_summary_hint = summary_text if summary_text else "（暂时没有需要回顾的长期记忆）"
 
-    return {
+    result = {
         "event_memory_hint": event_memory_hint,
         "long_term_summary_hint": long_term_summary_hint
     }
+    logger.info(
+        "[PERF] build_memory_context events_load=%.4fs rank=%.4fs total=%.4fs events=%d",
+        loaded_at - started_at,
+        ranked_at - loaded_at,
+        time.perf_counter() - started_at,
+        len(all_events),
+    )
+    return result
 
 
 def _build_event_hint_with_budget(events, max_chars):

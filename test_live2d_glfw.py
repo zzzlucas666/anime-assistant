@@ -13,14 +13,17 @@ live2d-py 内部 glewInit() 的兼容性上。
 import sys
 import os
 
-MODEL_JSON_PATH = r"C:\mio\mio\MIO.model3.json"
-
 import glfw
 from OpenGL.GL import glViewport, glClearColor, glClear, GL_COLOR_BUFFER_BIT
 import live2d.v3 as live2d
 
 
 def main():
+    model_json_path = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("LIVE2D_MODEL_PATH")
+    if not model_json_path or not os.path.isfile(model_json_path):
+        print("❌ 请通过命令行参数或 LIVE2D_MODEL_PATH 环境变量提供有效的 model3.json")
+        sys.exit(1)
+
     if not glfw.init():
         print("❌ GLFW 初始化失败")
         sys.exit(1)
@@ -52,7 +55,7 @@ def main():
         sys.exit(1)
 
     model = live2d.LAppModel()
-    model.LoadModelJson(MODEL_JSON_PATH)
+    model.LoadModelJson(model_json_path)
     model.Resize(600, 800)
     print("✅ 模型加载成功！")
 

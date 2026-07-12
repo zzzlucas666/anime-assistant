@@ -2,7 +2,12 @@
     "assistant_name": "Anime Assistant",
     "model": "deepseek-chat",
     "api_key": "YOUR_API_KEY_HERE",
-    "live2d_model_path": "C:\\mio\\mio\\MIO.model3.json",
+    "base_url": "https://api.deepseek.com",
+    "proactive_check_interval_minutes": 5,
+    "proactive_idle_threshold_minutes": 30,
+    "proactive_min_interval_minutes": 120,
+    "proactive_max_per_day": 3,
+    "live2d_model_path": "",
     "live2d_expression_intensity": 1.0,
     "live2d_expression_map": {
         "happy": "",

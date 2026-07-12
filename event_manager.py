@@ -1,21 +1,126 @@
-from openai import OpenAI
-import json
 import uuid
 import datetime
+import os
+import threading
+import time
+from ai.client import create_ai_client
+from app_paths import DATA_DIR
+from data_models import normalize_event_extraction, normalize_event_record, parse_json_object
 from Storage_utils import safe_load_json, safe_save_json
 from logger_utils import get_logger
 from semantic_memory import embed_text, find_semantically_relevant
 
 logger = get_logger(__name__)
 
-EVENT_PATH = "data/event_memory.json"
+EVENT_PATH = str(DATA_DIR / "event_memory.json")
+_event_cache_lock = threading.RLock()
+_event_cache_path = None
+_event_cache_signature = None
+_event_cache = None
 
 
 def default_events():
     return []
 
 
-def extract_event(api_key, model, user_message, ai_reply):
+def _normalize_event(event, seen_ids=None):
+    """把旧版事件补齐为当前结构。
+
+    旧数据没有可靠的发生时间时保留为 None，不用迁移时间伪装成
+    刚发生的事件。embedding 也只补 None，避免一次数据迁移意外触发
+    本地模型下载或大批量向量计算。
+
+    返回 (normalized_event, changed)。非字典项返回 (None, True)。
+    """
+    if not isinstance(event, dict):
+        return None, True
+
+    normalized = normalize_event_record(event)
+    if normalized is None:
+        return None, True
+    changed = normalized != event
+
+    event_id = normalized.get("id")
+    if not event_id or (seen_ids is not None and event_id in seen_ids):
+        normalized["id"] = uuid.uuid4().hex
+        changed = True
+
+    if seen_ids is not None:
+        seen_ids.add(normalized["id"])
+
+    return normalized, changed
+
+
+def _event_file_signature():
+    try:
+        stat = os.stat(EVENT_PATH)
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
+def _replace_event_cache(events):
+    global _event_cache_path, _event_cache_signature, _event_cache
+    _event_cache_path = EVENT_PATH
+    _event_cache_signature = _event_file_signature()
+    _event_cache = events
+
+
+def clear_event_cache():
+    """清空进程内事件缓存，主要供测试和显式重载使用。"""
+    global _event_cache_path, _event_cache_signature, _event_cache
+    with _event_cache_lock:
+        _event_cache_path = None
+        _event_cache_signature = None
+        _event_cache = None
+
+
+def _load_events():
+    """统一读取事件。文件未变化时直接返回进程内缓存的浅拷贝。"""
+    started_at = time.perf_counter()
+    with _event_cache_lock:
+        signature = _event_file_signature()
+        if (
+            _event_cache is not None
+            and _event_cache_path == EVENT_PATH
+            and _event_cache_signature == signature
+        ):
+            logger.info(
+                "[PERF] 事件存储 cache=hit events=%d duration=%.4fs",
+                len(_event_cache),
+                time.perf_counter() - started_at,
+            )
+            return list(_event_cache)
+
+        raw_events = safe_load_json(EVENT_PATH, default_events)
+        if not isinstance(raw_events, list):
+            raw_events = []
+            changed = True
+        else:
+            changed = False
+
+        events = []
+        seen_ids = set()
+        for event in raw_events:
+            normalized, item_changed = _normalize_event(event, seen_ids=seen_ids)
+            changed = changed or item_changed
+            if normalized is not None:
+                events.append(normalized)
+
+        if changed:
+            safe_save_json(EVENT_PATH, events)
+            logger.info("已将旧版事件数据迁移到当前结构，共 %d 条。", len(events))
+
+        _replace_event_cache(events)
+        logger.info(
+            "[PERF] 事件存储 cache=miss events=%d duration=%.4fs",
+            len(events),
+            time.perf_counter() - started_at,
+        )
+        return list(events)
+
+
+def extract_event(api_key, model, user_message, ai_reply, base_url=None):
     """
     用 AI 判断这轮对话里是否发生了"值得记住的事件"，
     覆盖范围比之前的规则匹配（只认"喜欢"+"吗"）广得多，
@@ -26,10 +131,7 @@ def extract_event(api_key, model, user_message, ai_reply):
     """
 
     try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.deepseek.com"
-        )
+        client = create_ai_client(api_key, base_url)
 
         prompt = f"""
 你是一个事件记忆提取器，负责从一轮对话中判断是否发生了"值得长期记住的事件"。
@@ -58,9 +160,9 @@ def extract_event(api_key, model, user_message, ai_reply):
 - 不要用"用户提到/表达了xxx"这种空洞的固定句式，要把具体内容写清楚
 - 包含具体的人、事、物、时间等细节，让这句话本身就能传达完整信息
 - 反例（太空洞）："用户提到下周要考试"
-- 正例（够具体）："Lucas说他下周三有一场很重要的数学考试，感到有点紧张，希望考好"
+- 正例（够具体）："对方说下周三有一场很重要的数学考试，感到有点紧张，希望考好"
 - 反例（太空洞）："用户表达了对某事的喜好"
-- 正例（够具体）："Lucas说他很喜欢摇滚乐，尤其喜欢一些节奏强烈的乐队"
+- 正例（够具体）："对方说他很喜欢摇滚乐，尤其喜欢一些节奏强烈的乐队"
 
 判断标准：
 - increase_bond：能显著增进感情的事件（用户表达关心、分享心事、确认情感等），importance 通常 >= 0.7
@@ -91,21 +193,22 @@ AI的回复：
         return None
 
     try:
-        result = json.loads(content)
-    except Exception:
+        result = normalize_event_extraction(parse_json_object(content))
+    except Exception as e:
+        logger.warning("事件提取结果校验失败（已跳过本轮事件记忆）：%s", e)
         return None
 
     if not result.get("is_event"):
         return None
 
-    event_text = result.get("event", "")
+    event_text = result["event"]
 
     return {
         "id": uuid.uuid4().hex,
         "event": event_text,
-        "emotion": result.get("emotion", "neutral"),
-        "impact": result.get("impact", "none"),
-        "importance": result.get("importance", 0.3),
+        "emotion": result["emotion"],
+        "impact": result["impact"],
+        "importance": result["importance"],
         "notified": False,
         # 创建时间，供 Hybrid Retrieval 计算"时间衰减"分数用
         "created_at": datetime.datetime.now().isoformat(),
@@ -119,9 +222,14 @@ def save_event(event):
     if not event:
         return
 
-    data = safe_load_json(EVENT_PATH, default_events)
-    data.append(event)
-    safe_save_json(EVENT_PATH, data)
+    with _event_cache_lock:
+        data = _load_events()
+        normalized, _ = _normalize_event(event, seen_ids={e["id"] for e in data})
+        if normalized is None:
+            return
+        data.append(normalized)
+        if safe_save_json(EVENT_PATH, data):
+            _replace_event_cache(data)
 
 
 def load_all_events():
@@ -129,7 +237,7 @@ def load_all_events():
     读取全部事件（不做任何过滤），供 context_builder 的 Hybrid Retrieval
     自己综合语义/重要度/时间衰减打分排序。
     """
-    return safe_load_json(EVENT_PATH, default_events)
+    return _load_events()
 
 
 def load_recent_events(limit=5, min_importance=0.5):
@@ -140,7 +248,7 @@ def load_recent_events(limit=5, min_importance=0.5):
     - 只挑选 importance >= min_importance 的事件（过滤掉"普通对话"这类噪音）
     - 按时间顺序保留最近 limit 条（越新越靠后）
     """
-    data = safe_load_json(EVENT_PATH, default_events)
+    data = _load_events()
 
     important_events = [
         e for e in data
@@ -155,7 +263,7 @@ def get_unnotified_important_events(min_importance=0.7):
     获取"重要且还没被主动提起过"的事件，供 Initiative Engine 判断是否要
     主动找用户聊起某件事。
     """
-    data = safe_load_json(EVENT_PATH, default_events)
+    data = _load_events()
 
     return [
         e for e in data
@@ -167,16 +275,17 @@ def get_unnotified_important_events(min_importance=0.7):
 
 def mark_event_notified(event_id):
     """把某条事件标记为"已经主动提起过"，避免下次又重复提起同一件事"""
-    data = safe_load_json(EVENT_PATH, default_events)
+    with _event_cache_lock:
+        data = [event.copy() for event in _load_events()]
 
-    changed = False
-    for e in data:
-        if isinstance(e, dict) and e.get("id") == event_id:
-            e["notified"] = True
-            changed = True
+        changed = False
+        for e in data:
+            if isinstance(e, dict) and e.get("id") == event_id:
+                e["notified"] = True
+                changed = True
 
-    if changed:
-        safe_save_json(EVENT_PATH, data)
+        if changed and safe_save_json(EVENT_PATH, data):
+            _replace_event_cache(data)
 
 
 def get_semantically_relevant_events(query_text, top_k=3, min_importance=0.0):
@@ -191,7 +300,7 @@ def get_semantically_relevant_events(query_text, top_k=3, min_importance=0.0):
     if not query_text:
         return []
 
-    data = safe_load_json(EVENT_PATH, default_events)
+    data = _load_events()
     candidates = [
         e for e in data
         if isinstance(e, dict) and e.get("importance", 0) >= min_importance

@@ -1,5 +1,10 @@
-from openai import OpenAI
-import json
+from ai.client import create_ai_client
+from data_models import (
+    normalize_emotion,
+    normalize_intent_result,
+    normalize_profile,
+    parse_json_object,
+)
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -126,15 +131,14 @@ def _local_detect_intent(user_message):
     return _result("chat", 0.9)
 
 
-def detect_intent(api_key, model, user_message, emotion, profile):
+def detect_intent(api_key, model, user_message, emotion, profile, base_url=None):
+    emotion = normalize_emotion(emotion)
+    profile = normalize_profile(profile)
     local_result = _local_detect_intent(user_message)
     if local_result is not None:
         return local_result
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.deepseek.com"
-    )
+    client = create_ai_client(api_key, base_url)
 
     prompt = f"""
 你是一个高级AI意图分析器。
@@ -209,10 +213,8 @@ def detect_intent(api_key, model, user_message, emotion, profile):
         }
 
     try:
-        return json.loads(content)
-    except Exception:
-        return {
-            "intent": "chat",
-            "confidence": 0.5,
-            "slots": {}
-        }
+        parsed = parse_json_object(content)
+        return normalize_intent_result(parsed, fallback_confidence=0.0)
+    except Exception as e:
+        logger.warning("意图识别结果校验失败（已使用默认意图 chat）：%s", e)
+        return normalize_intent_result(None)

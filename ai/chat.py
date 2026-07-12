@@ -1,13 +1,21 @@
-from openai import OpenAI
 import json
+import time
+from ai.client import create_ai_client
+from app_paths import DATA_DIR
 from context_builder import build_memory_context
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
 
 def load_persona():
-    with open("data/persona.json", "r", encoding="utf-8") as f:
+    with open(DATA_DIR / "persona.json", "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def get_user_display_name(profile):
+    """返回用于内部提示词的用户称呼，不再绑定某个特定用户名。"""
+    profile = profile or {}
+    return profile.get("nickname") or profile.get("name") or "对方"
 
 
 def build_relationship_hint(relationship):
@@ -178,23 +186,32 @@ def _extract_latest_user_message(messages):
 
 def _create_stream(messages, context):
     """单次创建一个流式请求，失败时直接抛出异常，由上层决定是否重试"""
+    started_at = time.perf_counter()
     query_text = _extract_latest_user_message(messages)
     system_prompt = build_system_prompt(context, query_text=query_text)
+    prompt_ready_at = time.perf_counter()
 
-    client = OpenAI(
-        api_key=context["config"]["api_key"],
-        base_url="https://api.deepseek.com"
+    client = create_ai_client(
+        context["config"]["api_key"],
+        context["config"].get("base_url"),
     )
 
     full_messages = [
         {"role": "system", "content": system_prompt}
     ] + messages
 
-    return client.chat.completions.create(
+    stream = client.chat.completions.create(
         model=context["config"]["model"],
         messages=full_messages,
         stream=True
     )
+    logger.info(
+        "[PERF] chat_stream_setup prompt=%.3fs connect=%.3fs total=%.3fs",
+        prompt_ready_at - started_at,
+        time.perf_counter() - prompt_ready_at,
+        time.perf_counter() - started_at,
+    )
+    return stream
 
 
 def chat_with_ai_stream(messages, context):
@@ -253,9 +270,9 @@ def generate_greeting(
 ):
     persona = load_persona()
 
-    client = OpenAI(
-        api_key=context["config"]["api_key"],
-        base_url="https://api.deepseek.com"
+    client = create_ai_client(
+        context["config"]["api_key"],
+        context["config"].get("base_url"),
     )
 
     prompt = f"""
@@ -322,11 +339,12 @@ def generate_proactive_message(context, reason_hint):
     import random
 
     system_prompt = build_system_prompt(context, query_text=reason_hint)
+    user_display_name = get_user_display_name(context.get("profile"))
 
     special_instruction = f"""
 
 # 【特殊场景：主动发起对话】
-现在不是用户先说话，而是你自己想主动找Lucas说一句话。
+现在不是用户先说话，而是你自己想主动找{user_display_name}说一句话。
 原因（仅供你参考，不要直接说出来，更不要提"触发""系统""检测"这类技术词汇）：
 {reason_hint}
 
@@ -336,9 +354,9 @@ def generate_proactive_message(context, reason_hint):
 - 不要说"我注意到""系统提示"等任何暴露后台机制的话
 """
 
-    client = OpenAI(
-        api_key=context["config"]["api_key"],
-        base_url="https://api.deepseek.com"
+    client = create_ai_client(
+        context["config"]["api_key"],
+        context["config"].get("base_url"),
     )
 
     try:

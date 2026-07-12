@@ -1,6 +1,8 @@
 from Storage_utils import safe_load_json, safe_save_json
+from app_paths import DATA_DIR
+from data_models import normalize_profile
 
-PROFILE_PATH = "data/user_profile.json"
+PROFILE_PATH = str(DATA_DIR / "user_profile.json")
 
 
 def default_profile():
@@ -22,7 +24,7 @@ def is_valid_memory(text):
         "呢",
         "呀",
         "啊",
-        "啥"
+        "啥",
         "?",
         "？"
     ]
@@ -36,6 +38,10 @@ def is_valid_memory(text):
     return True
 
 def update_profile(profile, user_message):
+
+    normalized = normalize_profile(profile)
+    profile.clear()
+    profile.update(normalized)
 
     # 我叫什么
     if user_message.startswith("我叫"):
@@ -86,8 +92,15 @@ def update_profile(profile, user_message):
 
 
 def load_profile():
-    return safe_load_json(PROFILE_PATH, default_profile)
+    raw_profile = safe_load_json(PROFILE_PATH, default_profile)
+    profile = normalize_profile(raw_profile)
+    if profile != raw_profile:
+        safe_save_json(PROFILE_PATH, profile)
+    return profile
 
 
 def save_profile(profile):
-    safe_save_json(PROFILE_PATH, profile)
+    normalized = normalize_profile(profile)
+    profile.clear()
+    profile.update(normalized)
+    return safe_save_json(PROFILE_PATH, profile)

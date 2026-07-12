@@ -1,6 +1,8 @@
 from Storage_utils import safe_load_json, safe_save_json
+from app_paths import DATA_DIR
+from data_models import normalize_event_record, normalize_relationship
 
-RELATIONSHIP_PATH = "data/relationship.json"
+RELATIONSHIP_PATH = str(DATA_DIR / "relationship.json")
 
 
 def default_relationship():
@@ -12,11 +14,18 @@ def default_relationship():
 
 
 def load_relationship():
-    return safe_load_json(RELATIONSHIP_PATH, default_relationship)
+    raw_relationship = safe_load_json(RELATIONSHIP_PATH, default_relationship)
+    relationship = normalize_relationship(raw_relationship)
+    if relationship != raw_relationship:
+        safe_save_json(RELATIONSHIP_PATH, relationship)
+    return relationship
 
 
 def save_relationship(data):
-    safe_save_json(RELATIONSHIP_PATH, data)
+    normalized = normalize_relationship(data)
+    data.clear()
+    data.update(normalized)
+    return safe_save_json(RELATIONSHIP_PATH, data)
 
 
 def update_relationship(relationship, event):
@@ -31,13 +40,18 @@ def update_relationship(relationship, event):
         }
     也兼容旧的字符串调用方式："positive" / "negative" / "talk"。
     """
+    normalized = normalize_relationship(relationship)
+    relationship.clear()
+    relationship.update(normalized)
+
     # 兼容旧调用方式（直接传字符串）
     if isinstance(event, str):
         impact = event
         importance = 1.0
     else:
-        impact = event.get("impact", "none") if event else "none"
-        importance = event.get("importance", 0.5) if event else 0.5
+        normalized_event = normalize_event_record(event) if event else None
+        impact = normalized_event["impact"] if normalized_event else "none"
+        importance = normalized_event["importance"] if normalized_event else 0.5
 
     if impact == "increase_bond":
         relationship["affection"] += 3 * importance

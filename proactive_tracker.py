@@ -8,12 +8,14 @@ Initiative Engine 无限期地每隔几十分钟就调一次 AI。
 """
 
 import datetime
+from app_paths import DATA_DIR
+from data_models import normalize_proactive_state
 from Storage_utils import safe_load_json, safe_save_json
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
 
-PROACTIVE_STATE_PATH = "data/proactive_state.json"
+PROACTIVE_STATE_PATH = str(DATA_DIR / "proactive_state.json")
 
 MIN_INTERVAL_MINUTES = 60   # 两次主动消息之间至少间隔1小时
 MAX_PER_DAY = 3              # 每天最多主动找用户聊3次
@@ -28,11 +30,18 @@ def default_proactive_state():
 
 
 def _load_state():
-    return safe_load_json(PROACTIVE_STATE_PATH, default_proactive_state)
+    raw_state = safe_load_json(PROACTIVE_STATE_PATH, default_proactive_state)
+    state = normalize_proactive_state(raw_state)
+    if state != raw_state:
+        safe_save_json(PROACTIVE_STATE_PATH, state)
+    return state
 
 
 def _save_state(state):
-    safe_save_json(PROACTIVE_STATE_PATH, state)
+    normalized = normalize_proactive_state(state)
+    state.clear()
+    state.update(normalized)
+    return safe_save_json(PROACTIVE_STATE_PATH, state)
 
 
 def can_trigger_proactive(

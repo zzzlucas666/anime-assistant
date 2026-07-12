@@ -1,5 +1,5 @@
-from openai import OpenAI
-import json
+from ai.client import create_ai_client
+from data_models import normalize_profile_extraction, parse_json_object
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -8,13 +8,11 @@ logger = get_logger(__name__)
 def extract_profile_info(
     api_key,
     model,
-    user_message
+    user_message,
+    base_url=None,
 ):
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.deepseek.com"
-    )
+    client = create_ai_client(api_key, base_url)
 
     prompt = f"""
 分析用户的话。
@@ -70,11 +68,8 @@ none
         }
 
     try:
-        return json.loads(
-            response.choices[0].message.content
-        )
-    except Exception:
-        return {
-            "action": "none",
-            "value": ""
-        }
+        parsed = parse_json_object(response.choices[0].message.content)
+        return normalize_profile_extraction(parsed)
+    except Exception as e:
+        logger.warning("资料提取结果校验失败（已跳过本轮资料更新）：%s", e)
+        return normalize_profile_extraction(None)

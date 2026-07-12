@@ -13,20 +13,11 @@ from profile_manager import load_profile
 from relationship_manager import load_relationship
 from orchestrator import ConversationOrchestrator
 from initiative_engine import InitiativeEngine
-
-# 主动聊天的可调参数：
-# CHECK_INTERVAL_MINUTES：后台多久检查一次
-# IDLE_THRESHOLD_MINUTES：距上次互动超过多久才算"很久没聊"
-# PROACTIVE_MIN_INTERVAL_MINUTES：两次主动消息之间至少间隔多久
-# PROACTIVE_MAX_PER_DAY：每天最多主动找用户聊几次
-CHECK_INTERVAL_MINUTES = 5
-IDLE_THRESHOLD_MINUTES = 30
-PROACTIVE_MIN_INTERVAL_MINUTES = 120
-PROACTIVE_MAX_PER_DAY = 3
-
+from semantic_memory import warmup_model_async
 
 def main():
     config = load_config()
+    warmup_model_async()
     conversation_history = load_memory()
     emotion = load_emotion()
     profile = load_profile()
@@ -45,10 +36,10 @@ def main():
     initiative_engine = InitiativeEngine(
         config, context, conversation_history, emotion, profile, relationship,
         lock=state_lock,
-        check_interval_minutes=CHECK_INTERVAL_MINUTES,
-        idle_threshold_minutes=IDLE_THRESHOLD_MINUTES,
-        proactive_min_interval_minutes=PROACTIVE_MIN_INTERVAL_MINUTES,
-        proactive_max_per_day=PROACTIVE_MAX_PER_DAY
+        check_interval_minutes=config["proactive_check_interval_minutes"],
+        idle_threshold_minutes=config["proactive_idle_threshold_minutes"],
+        proactive_min_interval_minutes=config["proactive_min_interval_minutes"],
+        proactive_max_per_day=config["proactive_max_per_day"],
     )
 
     background_thread = threading.Thread(target=initiative_engine.run_loop, daemon=True)
@@ -89,6 +80,9 @@ def main():
                 orchestrator.finalize_turn(prepared, raw_reply)
     finally:
         initiative_engine.stop()
+        # run_loop 在普通等待状态下会立即被 stop() 唤醒。如果正在等待
+        # 主动消息的网络请求，最多等待两秒，之后由 daemon 线程收尾。
+        background_thread.join(timeout=2)
         orchestrator.shutdown()
 
 

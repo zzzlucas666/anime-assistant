@@ -218,3 +218,10 @@ __marimo__/
 .streamlit/secrets.toml
 config/settings.json
 conversation_history.json
+
+# Anime Assistant local runtime state
+venv312/
+.idea/
+data/*
+!data/.gitkeep
+!data/persona.json

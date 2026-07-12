@@ -58,7 +58,8 @@ from orchestrator import ConversationOrchestrator
 from initiative_engine import InitiativeEngine
 from logger_utils import get_logger
 from character_controller import CharacterController
-from live2d_model_utils import load_live2d_model_metadata
+from live2d_model_utils import load_live2d_model_metadata, resolve_live2d_model_path
+from semantic_memory import warmup_model_async
 
 logger = get_logger(__name__)
 
@@ -73,10 +74,6 @@ try:
 except ImportError as e:
     LIVE2D_AVAILABLE = False
     logger.info("未检测到 live2d-py / PyOpenGL，将不显示角色立绘（不影响聊天功能）：%s", e)
-
-# Live2D 模型路径从 config/settings.json 的 live2d_model_path 读取。
-# 没配置时保留旧路径，避免升级后原本能显示的模型突然消失。
-DEFAULT_LIVE2D_MODEL_PATH = r"C:\mio\mio\MIO.model3.json"
 
 # 当前 MIO 模型没有单独的 exp3 表情文件，所以先用参数预设做轻量表情。
 # 上一版数值太克制，在部分模型上几乎看不出来；这里改成更明显的默认效果。
@@ -139,12 +136,6 @@ DEFAULT_LIVE2D_PARAMETER_MAP = {
     },
 }
 DEFAULT_LIVE2D_EXPRESSION_INTENSITY = 1.0
-
-# 主动聊天的可调参数，跟 main.py 保持一致
-CHECK_INTERVAL_MINUTES = 5
-IDLE_THRESHOLD_MINUTES = 30
-PROACTIVE_MIN_INTERVAL_MINUTES = 120
-PROACTIVE_MAX_PER_DAY = 3
 
 # 配色：跳出"黑客终端绿"的俗套，改用低饱和度的暖灰底 + 鼠尾草绿/暖棕调，更显克制精致
 BG_COLOR = "#0d0d0f"
@@ -237,6 +228,7 @@ class ProactiveBridge(QObject):
     这个 QObject 所属线程（这里是GUI主线程）的槽函数里执行，不需要自己加锁。
     """
     message_received = Signal(str)
+    state_updated = Signal()
 
 
 if LIVE2D_AVAILABLE:
@@ -369,11 +361,11 @@ if LIVE2D_AVAILABLE:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, config=None):
         super().__init__()
 
-        self.config = load_config()
-        self.live2d_model_path = self.config.get("live2d_model_path", DEFAULT_LIVE2D_MODEL_PATH)
+        self.config = config or load_config()
+        self.live2d_model_path = resolve_live2d_model_path(self.config.get("live2d_model_path"))
         self.live2d_metadata = load_live2d_model_metadata(self.live2d_model_path)
         conversation_history = load_memory()
         emotion = load_emotion()
@@ -389,21 +381,23 @@ class MainWindow(QMainWindow):
 
         self.state_lock = threading.Lock()
 
-        self.orchestrator = ConversationOrchestrator(
-            self.config, self.context, conversation_history, emotion, profile, relationship,
-            lock=self.state_lock
-        )
-
         self.proactive_bridge = ProactiveBridge()
         self.proactive_bridge.message_received.connect(self._on_proactive_message)
+        self.proactive_bridge.state_updated.connect(self._update_status_bar)
+
+        self.orchestrator = ConversationOrchestrator(
+            self.config, self.context, conversation_history, emotion, profile, relationship,
+            lock=self.state_lock,
+            on_state_updated=self.proactive_bridge.state_updated.emit,
+        )
 
         self.initiative_engine = InitiativeEngine(
             self.config, self.context, conversation_history, emotion, profile, relationship,
             lock=self.state_lock,
-            check_interval_minutes=CHECK_INTERVAL_MINUTES,
-            idle_threshold_minutes=IDLE_THRESHOLD_MINUTES,
-            proactive_min_interval_minutes=PROACTIVE_MIN_INTERVAL_MINUTES,
-            proactive_max_per_day=PROACTIVE_MAX_PER_DAY,
+            check_interval_minutes=self.config["proactive_check_interval_minutes"],
+            idle_threshold_minutes=self.config["proactive_idle_threshold_minutes"],
+            proactive_min_interval_minutes=self.config["proactive_min_interval_minutes"],
+            proactive_max_per_day=self.config["proactive_max_per_day"],
             # 关键：传入一个会 emit 信号的回调，而不是让它直接 print。
             # GUI模式下不再需要 prompt_toolkit 的 patch_stdout 技巧，
             # 因为信号/槽机制天生就不会跟用户输入冲突。
@@ -411,6 +405,9 @@ class MainWindow(QMainWindow):
         )
 
         self._worker = None  # 当前正在跑的 ChatWorker，发送下一条前要确认它已结束
+        self._is_closing = False
+        self._close_after_worker_connected = False
+        self._live2d_disposed = False
 
         # 聊天记录的"数据模型"：每条是 {"role": "user"/"mio"/"system", "text": "..."}
         # 渲染时统一从这份数据重新生成HTML，而不是直接操作富文本控件的中间状态。
@@ -741,9 +738,13 @@ class MainWindow(QMainWindow):
         self._render()
         self._update_status_bar()
 
-        self.input_line.setEnabled(True)
-        self.send_button.setEnabled(True)
-        self.input_line.setFocus()
+        if self._is_closing:
+            self.input_line.setEnabled(False)
+            self.send_button.setEnabled(False)
+        else:
+            self.input_line.setEnabled(True)
+            self.send_button.setEnabled(True)
+            self.input_line.setFocus()
 
     def _on_worker_error(self, error_text):
         logger.error("聊天处理失败：%s", error_text)
@@ -804,22 +805,56 @@ class MainWindow(QMainWindow):
         )
         self._background_thread.start()
 
+    def _finish_close_after_worker(self):
+        """ChatWorker 自然结束后重新发起关闭，此时可以安全销毁 QThread。"""
+        self.close()
+
     def closeEvent(self, event):
+        self._is_closing = True
+        self.initiative_engine.stop()
+
+        # QThread 不能在 run() 仍执行时被父窗口销毁。OpenAI 的同步请求
+        # 也无法安全强制终止，所以先拒绝这次关闭，等 worker 的 finished
+        # 信号到达后再关一次。
+        if self._worker is not None and self._worker.isRunning():
+            self.input_line.setEnabled(False)
+            self.send_button.setEnabled(False)
+            self.setWindowTitle(f"{self.config.get('assistant_name', 'Anime Assistant')} - 正在安全退出")
+            if not self._close_after_worker_connected:
+                self._worker.finished.connect(self._finish_close_after_worker)
+                self._close_after_worker_connected = True
+            event.ignore()
+            return
+
         self.cursor_timer.stop()
         self.typing_timer.stop()
         self.stream_render_timer.stop()
         if self.live2d_widget is not None and hasattr(self.live2d_widget, "_frame_timer"):
             self.live2d_widget._frame_timer.stop()
-        self.initiative_engine.stop()
+
+        if hasattr(self, "_background_thread"):
+            self._background_thread.join(timeout=2)
+
+        # 必须先确认 ChatWorker 已结束，再关闭 Orchestrator 的内部线程池。
         self.orchestrator.shutdown()
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.wait(2000)
+
+        if LIVE2D_AVAILABLE and not self._live2d_disposed:
+            try:
+                live2d.dispose()
+            except Exception as e:
+                logger.warning("Live2D 释放资源时出错（已忽略）：%s", e)
+            self._live2d_disposed = True
+
         super().closeEvent(event)
 
 
 def main():
     config = load_config()
-    live2d_model_path = config.get("live2d_model_path", DEFAULT_LIVE2D_MODEL_PATH)
+    warmup_model_async()
+    live2d_model_path = resolve_live2d_model_path(config.get("live2d_model_path"))
+    # 下面 MainWindow 会再根据配置建立界面。把已验证的路径放回配置，
+    # 避免无效路径重复记录两次警告。
+    config["live2d_model_path"] = live2d_model_path or ""
 
     if LIVE2D_AVAILABLE and live2d_model_path:
         # 显式请求 OpenGL 2.1（不涉及Profile概念），这是经过反复排查后
@@ -829,7 +864,7 @@ def main():
         QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow(config)
     window.show()
     sys.exit(app.exec())
 

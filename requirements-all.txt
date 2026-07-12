@@ -1,0 +1,3 @@
+-r requirements-gui.txt
+-r requirements-memory.txt
+-r requirements-live2d.txt
