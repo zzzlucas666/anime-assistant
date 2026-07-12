@@ -1,7 +1,9 @@
 import datetime
 from Storage_utils import safe_load_json, safe_save_json
+from app_paths import DATA_DIR
+from data_models import normalize_emotion
 
-EMOTION_PATH = "data/emotion_state.json"
+EMOTION_PATH = str(DATA_DIR / "emotion_state.json")
 
 # mood 自然回归 neutral 的等待时间：超过这么久没有新的"强情绪事件"，
 # 心情就慢慢平复下来，而不是永远卡在上一次的状态
@@ -32,11 +34,18 @@ def default_emotion():
 
 
 def load_emotion():
-    return safe_load_json(EMOTION_PATH, default_emotion)
+    raw_emotion = safe_load_json(EMOTION_PATH, default_emotion)
+    emotion = normalize_emotion(raw_emotion)
+    if emotion != raw_emotion:
+        safe_save_json(EMOTION_PATH, emotion)
+    return emotion
 
 
 def save_emotion(emotion):
-    safe_save_json(EMOTION_PATH, emotion)
+    normalized = normalize_emotion(emotion)
+    emotion.clear()
+    emotion.update(normalized)
+    return safe_save_json(EMOTION_PATH, emotion)
 
 
 def _elapsed_minutes(timestamp_str, now):
@@ -62,6 +71,9 @@ def update_emotion(emotion, event=None):
     event: event_manager.extract_event() 返回的字典，或者 None（比如本轮是
            router 精确回复、没有走事件提取）。
     """
+    normalized = normalize_emotion(emotion)
+    emotion.clear()
+    emotion.update(normalized)
     now = datetime.datetime.now()
 
     elapsed = _elapsed_minutes(emotion.get("last_updated"), now)

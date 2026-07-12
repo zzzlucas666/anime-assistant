@@ -25,23 +25,24 @@ InitiativeEngine —— 负责判断"要不要主动找用户说话"，以及触
 情绪信号有"参与判断"的机会。
 
 线程安全：
-    这个类的 check_and_trigger() 会读写共享状态（emotion/profile/relationship/
-    conversation_history 以及它们对应的文件），调用前必须持有跟主循环共用的同一把锁，
-    避免和用户那边的对话流程同时写文件。
+    check_and_trigger() 内部自己管理跟主循环共用的状态锁。
+    触发判断和最终提交在锁内，网络 AI 请求在锁外，避免慢请求
+    阻塞用户那边的对话流程。
 """
 
 import threading
 import datetime
+import copy
 
 from event_manager import get_unnotified_important_events, mark_event_notified
 from interaction_tracker import load_last_interaction_time, update_last_interaction_time
 from proactive_tracker import can_trigger_proactive, record_proactive_trigger
-from ai.chat import generate_proactive_message
+from ai.chat import generate_proactive_message, get_user_display_name
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
 from memory_manager import save_memory
-from long_term_memory import summarize_overflow
+from long_term_memory import queue_summary_messages, summarize_pending_if_ready
 
 # 各信号的权重，加起来不要求恰好是1，但保持在同一量级方便理解和调参
 EVENT_WEIGHT = 0.5
@@ -98,13 +99,6 @@ class InitiativeEngine:
     # 触发条件判断（纯规则，不调用AI，便宜且可控）
     # ------------------------------------------------------------------
 
-    def _minutes_since_last_interaction(self):
-        last_time = load_last_interaction_time()
-        if last_time is None:
-            return None
-        delta = datetime.datetime.now() - last_time
-        return delta.total_seconds() / 60
-
     def _compute_signals(self, idle_minutes):
         """
         计算三个信号的原始分数（0~1）以及相关的中间数据，
@@ -158,6 +152,7 @@ class InitiativeEngine:
         信号可以叠加着一起说明，而不是只能挑一个"最优先"的理由）。
         """
         reasons = []
+        user_display_name = get_user_display_name(self.profile)
 
         top_event = signals["top_event"]
         if top_event and top_event.get("importance", 0) >= MIN_EVENT_IMPORTANCE_TO_MENTION:
@@ -166,7 +161,7 @@ class InitiativeEngine:
         idle_minutes = signals["idle_minutes"]
         if signals["emotion_score"] > 0.1:
             reasons.append(
-                f"你已经有一段时间没和Lucas聊天了（约 {int(idle_minutes or 0)} 分钟），"
+                f"你已经有一段时间没和{user_display_name}聊天了（约 {int(idle_minutes or 0)} 分钟），"
                 f"而且你现在心情不太好（mood={signals['mood']}，energy={signals['energy']}），"
                 f"有点想找他说说话。"
             )
@@ -175,13 +170,13 @@ class InitiativeEngine:
             # 只在情绪信号没有贡献的情况下，才单独提"纯粹很久没聊"，
             # 避免同时出现"情绪不好"和"单纯想聊"两条听起来重复的理由
             reasons.append(
-                f"你已经有一段时间没和Lucas聊天了（约 {int(idle_minutes or 0)} 分钟），"
+                f"你已经有一段时间没和{user_display_name}聊天了（约 {int(idle_minutes or 0)} 分钟），"
                 f"你们已经比较熟悉了（熟悉度 {signals['familiarity_pct']}），有点想他了。"
             )
 
         if not reasons:
             # 理论上不会发生（总分够才会走到这里），留个兜底避免空提示
-            reasons.append("你突然有点想主动找Lucas说句话。")
+            reasons.append(f"你突然有点想主动找{user_display_name}说句话。")
 
         return " ".join(reasons)
 
@@ -196,54 +191,92 @@ class InitiativeEngine:
         update_last_interaction_time()
         # 记录冷却状态（今日计数 + 上次触发时间）
         record_proactive_trigger()
-
-        # 注意：这里是在 self.lock 持有期间调用的AI请求，理论上不是最优实践
-        # （正常对话流程里我们都把AI调用挪到锁外做），但主动消息本身受冷却限制，
-        # 触发频率很低（几小时一次），这个权衡是可以接受的，不值得为此增加复杂度。
-        if overflow:
-            summarize_overflow(self.config['api_key'], self.config['model'], overflow)
+        return overflow
 
     def check_and_trigger(self):
         """
         计算加权综合评分，超过阈值才触发；否则返回 None。
-        调用前必须持有 self.lock（这个方法内部不加锁，由外部 run_loop 统一管理）。
+
+        分三段执行：
+        1. 锁内计算触发条件并取上下文快照；
+        2. 锁外生成 AI 消息；
+        3. 锁内复核用户没有在此期间说话，然后提交状态。
+
+        这样一次慢网络请求不会阻塞正常对话的文件和状态更新。
         """
-        # 全局冷却闸：即使触发条件持续满足，也不会无限期频繁触发
         cooldown_kwargs = {}
         if self.proactive_min_interval_minutes is not None:
             cooldown_kwargs["min_interval_minutes"] = self.proactive_min_interval_minutes
         if self.proactive_max_per_day is not None:
             cooldown_kwargs["max_per_day"] = self.proactive_max_per_day
 
-        if not can_trigger_proactive(**cooldown_kwargs):
-            return None
+        with self.lock:
+            # 全局冷却闸：即使触发条件持续满足，也不会无限期频繁触发。
+            if not can_trigger_proactive(**cooldown_kwargs):
+                return None
 
-        idle_minutes = self._minutes_since_last_interaction()
-        signals = self._compute_signals(idle_minutes)
+            interaction_snapshot = load_last_interaction_time()
+            if interaction_snapshot is None:
+                idle_minutes = None
+            else:
+                idle_minutes = (datetime.datetime.now() - interaction_snapshot).total_seconds() / 60
 
-        total_score = (
-            signals["event_score"] * EVENT_WEIGHT
-            + signals["emotion_score"] * EMOTION_WEIGHT
-            + signals["idle_score"] * IDLE_WEIGHT
+            signals = self._compute_signals(idle_minutes)
+            total_score = (
+                signals["event_score"] * EVENT_WEIGHT
+                + signals["emotion_score"] * EMOTION_WEIGHT
+                + signals["idle_score"] * IDLE_WEIGHT
+            )
+
+            logger.info(
+                "主动消息评分：event=%.2f emotion=%.2f idle=%.2f -> 总分=%.2f（阈值=%.2f）",
+                signals["event_score"], signals["emotion_score"], signals["idle_score"],
+                total_score, TRIGGER_THRESHOLD
+            )
+
+            if total_score < TRIGGER_THRESHOLD:
+                return None
+
+            reason_hint = self._build_reason_hint(signals)
+            context_snapshot = copy.deepcopy(self.context.get_context())
+
+        # 慢 AI 请求必须在锁外。
+        message = generate_proactive_message(context_snapshot, reason_hint)
+
+        with self.lock:
+            if self._stop_flag.is_set():
+                return None
+
+            # AI 生成期间如果用户已经说话，就不再把这条过时的主动消息
+            # 插到新对话中。时间戳来自同一个持久化字段，可直接比较。
+            if load_last_interaction_time() != interaction_snapshot:
+                logger.info("主动消息生成期间用户已互动，已放弃过时消息。")
+                return None
+
+            # 生成期间可能已跨过日界或冷却状态被其他进程更新，
+            # 提交前再做一次廉价复核。
+            if not can_trigger_proactive(**cooldown_kwargs):
+                return None
+
+            top_event = signals["top_event"]
+            if top_event and top_event.get("importance", 0) >= MIN_EVENT_IMPORTANCE_TO_MENTION:
+                event_id = top_event.get("id")
+                if event_id:
+                    mark_event_notified(event_id)
+                else:
+                    logger.warning("待通知事件缺少 id，已跳过通知标记：%s", top_event.get("event", ""))
+
+            overflow = self._record_message(message)
+
+        # 溢出历史先持久化到待处理队列，累计到批量阈值再调一次 AI。
+        if overflow:
+            queue_summary_messages(overflow)
+        summarize_pending_if_ready(
+            self.config['api_key'],
+            self.config['model'],
+            self.config.get("base_url"),
         )
 
-        logger.info(
-            "主动消息评分：event=%.2f emotion=%.2f idle=%.2f -> 总分=%.2f（阈值=%.2f）",
-            signals["event_score"], signals["emotion_score"], signals["idle_score"],
-            total_score, TRIGGER_THRESHOLD
-        )
-
-        if total_score < TRIGGER_THRESHOLD:
-            return None
-
-        reason_hint = self._build_reason_hint(signals)
-        message = generate_proactive_message(self.context.get_context(), reason_hint)
-
-        top_event = signals["top_event"]
-        if top_event and top_event.get("importance", 0) >= MIN_EVENT_IMPORTANCE_TO_MENTION:
-            mark_event_notified(top_event["id"])
-
-        self._record_message(message)
         return message
 
     # ------------------------------------------------------------------
@@ -263,13 +296,14 @@ class InitiativeEngine:
                 break
 
             try:
-                with self.lock:
-                    message = self.check_and_trigger()
+                message = self.check_and_trigger()
             except Exception as e:
                 logger.error("后台检查出错（已忽略，下次继续尝试）：%s", e)
                 continue
 
-            if message:
+            # stop() 可能在消息已提交、但长期摘要仍在生成时被调用。
+            # 退出后不再向 GUI 的 QObject 投递回调，避免窗口销毁后还有信号到达。
+            if message and not self._stop_flag.is_set():
                 if self.on_message:
                     self.on_message(message)
                 else:

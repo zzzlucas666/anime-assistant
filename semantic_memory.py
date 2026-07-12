@@ -15,36 +15,94 @@
 """
 
 import math
+import re
+import threading
+import time
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 
-_model = None  # 懒加载的单例，避免每次调用都重新加载模型（很慢）
+_model = None
+_model_state = "idle"  # idle / loading / ready / failed
+_model_lock = threading.Lock()
+_model_ready = threading.Event()
+_warmup_thread = None
 
 
-def _get_model():
-    global _model
-    if _model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            logger.info("正在加载语义检索模型 %s（首次加载会慢一些）...", MODEL_NAME)
-            _model = SentenceTransformer(MODEL_NAME)
-            logger.info("语义检索模型加载完成。")
-        except Exception as e:
-            logger.error("加载语义检索模型失败：%s", e)
-            _model = False  # 标记为"加载失败"，避免每次都重试加载浪费时间
-    return _model if _model is not False else None
+def _load_model_worker():
+    global _model, _model_state
+    started_at = time.perf_counter()
+    try:
+        from sentence_transformers import SentenceTransformer
+        logger.info("正在后台加载语义检索模型 %s...", MODEL_NAME)
+        loaded_model = SentenceTransformer(MODEL_NAME)
+    except Exception as e:
+        with _model_lock:
+            _model = None
+            _model_state = "failed"
+        logger.error("加载语义检索模型失败：%s", e)
+    else:
+        with _model_lock:
+            _model = loaded_model
+            _model_state = "ready"
+        logger.info(
+            "[PERF] 语义检索模型后台加载完成 duration=%.3fs",
+            time.perf_counter() - started_at,
+        )
+    finally:
+        _model_ready.set()
 
 
-def embed_text(text):
+def warmup_model_async():
+    """在 daemon 线程中预热语义模型，返回 True 表示本次启动了加载。"""
+    global _model_state, _warmup_thread
+    with _model_lock:
+        if _model_state != "idle":
+            return False
+        _model_state = "loading"
+        _model_ready.clear()
+        _warmup_thread = threading.Thread(
+            target=_load_model_worker,
+            name="semantic-model-warmup",
+            daemon=True,
+        )
+        _warmup_thread.start()
+    return True
+
+
+def _get_model(wait=False):
+    with _model_lock:
+        state = _model_state
+        model = _model
+
+    if state == "ready":
+        return model
+    if state == "failed":
+        return None
+    if state == "idle":
+        warmup_model_async()
+
+    if wait:
+        _model_ready.wait()
+        with _model_lock:
+            return _model if _model_state == "ready" else None
+    return None
+
+
+def is_model_ready():
+    with _model_lock:
+        return _model_state == "ready"
+
+
+def embed_text(text, wait_for_model=False):
     """
     把一段文本转成向量（list[float]）。
     模型加载失败或编码出错时返回 None，调用方需要妥善处理这个情况
     （语义检索不是关键路径，失败了就跳过，不能影响主流程）。
     """
-    model = _get_model()
+    model = _get_model(wait=wait_for_model)
     if model is None:
         return None
 
@@ -54,6 +112,33 @@ def embed_text(text):
     except Exception as e:
         logger.warning("文本向量化失败：%s", e)
         return None
+
+
+def _lexical_similarity(text_a, text_b):
+    """语义模型未就绪时的轻量中文字符 + bigram Jaccard 相似度。"""
+    def normalize(text):
+        return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(text or "").lower())
+
+    a = normalize(text_a)
+    b = normalize(text_b)
+    if not a or not b:
+        return 0.0
+    chars_a, chars_b = set(a), set(b)
+    char_union = chars_a | chars_b
+    char_score = len(chars_a & chars_b) / len(char_union) if char_union else 0.0
+    bigrams_a = {a[i:i + 2] for i in range(max(0, len(a) - 1))}
+    bigrams_b = {b[i:i + 2] for i in range(max(0, len(b) - 1))}
+    bigram_union = bigrams_a | bigrams_b
+    bigram_score = len(bigrams_a & bigrams_b) / len(bigram_union) if bigram_union else 0.0
+    return 0.35 * char_score + 0.65 * bigram_score
+
+
+def _lexical_scores(query_text, candidates):
+    return {
+        event.get("id"): _lexical_similarity(query_text, event.get("event", ""))
+        for event in candidates
+        if isinstance(event, dict) and event.get("id")
+    }
 
 
 def cosine_similarity(vec_a, vec_b):
@@ -80,7 +165,14 @@ def find_semantically_relevant(query_text, candidates, top_k=3, min_similarity=0
     """
     query_vector = embed_text(query_text)
     if query_vector is None:
-        return []
+        scores = _lexical_scores(query_text, candidates)
+        scored = [
+            (scores.get(event.get("id"), 0.0), event)
+            for event in candidates
+            if isinstance(event, dict) and scores.get(event.get("id"), 0.0) >= min_similarity
+        ]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [event for _, event in scored[:top_k]]
 
     scored = []
     for event in candidates:
@@ -88,8 +180,9 @@ def find_semantically_relevant(query_text, candidates, top_k=3, min_similarity=0
             continue
         event_vector = event.get("embedding")
         if not event_vector:
-            continue
-        sim = cosine_similarity(query_vector, event_vector)
+            sim = _lexical_similarity(query_text, event.get("event", ""))
+        else:
+            sim = cosine_similarity(query_vector, event_vector)
         if sim >= min_similarity:
             scored.append((sim, event))
 
@@ -111,18 +204,36 @@ def compute_similarity_scores(query_text, candidates):
     if not query_text:
         return {}
 
+    started_at = time.perf_counter()
     query_vector = embed_text(query_text)
     if query_vector is None:
-        return {}
+        scores = _lexical_scores(query_text, candidates)
+        logger.info(
+            "[PERF] 记忆检索 mode=lexical candidates=%d duration=%.4fs",
+            len(candidates),
+            time.perf_counter() - started_at,
+        )
+        return scores
 
     scores = {}
+    used_lexical_fallback = False
     for event in candidates:
         if not isinstance(event, dict):
             continue
         event_id = event.get("id")
         event_vector = event.get("embedding")
-        if not event_id or not event_vector:
+        if not event_id:
             continue
-        scores[event_id] = cosine_similarity(query_vector, event_vector)
+        if event_vector:
+            scores[event_id] = cosine_similarity(query_vector, event_vector)
+        else:
+            scores[event_id] = _lexical_similarity(query_text, event.get("event", ""))
+            used_lexical_fallback = True
 
+    logger.info(
+        "[PERF] 记忆检索 mode=%s candidates=%d duration=%.4fs",
+        "hybrid" if used_lexical_fallback else "embedding",
+        len(candidates),
+        time.perf_counter() - started_at,
+    )
     return scores

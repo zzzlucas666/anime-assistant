@@ -13,8 +13,11 @@ main.py 不再直接调用各个 manager，只负责：
 """
 
 from concurrent.futures import ThreadPoolExecutor
+import copy
+import queue
 import re
 import threading
+import time
 
 from intent_manager import detect_intent
 from profile_extractor import extract_profile_info
@@ -26,7 +29,11 @@ from relationship_manager import update_relationship, save_relationship
 from profile_manager import save_profile
 from memory_manager import save_memory
 from interaction_tracker import update_last_interaction_time
-from long_term_memory import summarize_overflow
+from long_term_memory import queue_summary_messages, summarize_pending_if_ready
+from logger_utils import get_logger
+
+
+logger = get_logger(__name__)
 
 
 def clean_reply(reply):
@@ -35,7 +42,17 @@ def clean_reply(reply):
 
 
 class ConversationOrchestrator:
-    def __init__(self, config, context, conversation_history, emotion, profile, relationship, lock=None):
+    def __init__(
+        self,
+        config,
+        context,
+        conversation_history,
+        emotion,
+        profile,
+        relationship,
+        lock=None,
+        on_state_updated=None,
+    ):
         self.config = config
         self.context = context
         self.conversation_history = conversation_history
@@ -45,10 +62,21 @@ class ConversationOrchestrator:
         # 跟 InitiativeEngine 共用同一把锁，避免两边同时读写状态文件。
         # 如果没传进来（比如单独测试这个类），就自己建一把，保证不报错。
         self.lock = lock if lock is not None else threading.Lock()
+        self.on_state_updated = on_state_updated
         # 给意图识别 + 资料提取并行用的小线程池，常驻即可，不用每轮新建
         self._executor = ThreadPoolExecutor(max_workers=2)
         # 累积本轮（用户消息+助手消息）产生的溢出消息，finalize_turn 结束时统一交给长期摘要
         self._pending_overflow = []
+        # 事件提取、情绪/关系更新和长期摘要按对话顺序在单一 daemon
+        # 线程中处理。这保留了状态顺序，又不阻塞 GUI 恢复输入。
+        self._postprocess_queue = queue.Queue()
+        self._postprocess_accepting = True
+        self._postprocess_thread = threading.Thread(
+            target=self._postprocess_loop,
+            name="conversation-postprocess",
+            daemon=True,
+        )
+        self._postprocess_thread.start()
 
     @staticmethod
     def _clean_input(user_message):
@@ -106,7 +134,11 @@ class ConversationOrchestrator:
         并判断本轮要不要走 router 精确回复。
         返回一个 dict，供 stream_reply / finalize_turn 使用。
         """
+        started_at = time.perf_counter()
         clean_message = self._clean_input(user_message)
+        with self.lock:
+            intent_emotion_snapshot = copy.deepcopy(self.emotion)
+            intent_profile_snapshot = copy.deepcopy(self.profile)
 
         # detect_intent 和 extract_profile_info 互不依赖，并行执行省一次往返延迟。
         # 但普通聊天没必要每轮都做资料提取，先用关键词过滤，减少一部分前置AI调用。
@@ -115,8 +147,9 @@ class ConversationOrchestrator:
             self.config['api_key'],
             self.config['model'],
             clean_message,
-            self.emotion,
-            self.profile
+            intent_emotion_snapshot,
+            intent_profile_snapshot,
+            self.config.get("base_url"),
         )
         profile_future = None
         if self._looks_like_profile_update(clean_message):
@@ -124,7 +157,8 @@ class ConversationOrchestrator:
                 extract_profile_info,
                 self.config['api_key'],
                 self.config['model'],
-                clean_message
+                clean_message,
+                self.config.get("base_url"),
             )
 
         intent_result = intent_future.result()
@@ -147,90 +181,168 @@ class ConversationOrchestrator:
             # 用户刚说了话，更新"上次互动时间"
             update_last_interaction_time()
 
+            # 生成回复时不持有全局状态锁，否则一次流式 AI 请求会把
+            # InitiativeEngine 整个阻塞住。在锁内取不可变快照，锁外只读快照，
+            # 也避免后台主动消息在流式生成期间改动正在使用的列表。
+            conversation_snapshot = copy.deepcopy(self.conversation_history)
+            context_snapshot = copy.deepcopy(self.context.get_context())
+
         # 精确查表类回复（询问喜好/昵称/情绪状态等），优先查表，查不到再退回 AI
         router_reply = None
         if intent in ("get_profile", "emotion_query") and confidence > 0.5:
             router_reply = handle_intent(intent, clean_message, self.profile, self.emotion, self.relationship)
 
-        return {
+        prepared = {
             "clean_message": clean_message,
             "intent": intent,
             "confidence": confidence,
-            "router_reply": router_reply
+            "router_reply": router_reply,
+            "conversation_snapshot": conversation_snapshot,
+            "context_snapshot": context_snapshot,
         }
+        logger.info(
+            "[PERF] prepare_turn intent=%s profile_extract=%s duration=%.3fs",
+            intent,
+            bool(profile_future),
+            time.perf_counter() - started_at,
+        )
+        return prepared
 
     def stream_reply(self, prepared):
         """
         生成回复内容，逐块 yield。
         命中 router 时直接整句 yield 一次；否则走 AI 流式生成。
         """
+        started_at = time.perf_counter()
+        first_chunk_at = None
         router_reply = prepared["router_reply"]
 
         if router_reply:
+            logger.info("[PERF] stream_reply source=router ttft=0.000s total=0.000s")
             yield router_reply
             return
 
-        for chunk in chat_with_ai_stream(
-            self.conversation_history,
-            self.context.get_context()
-        ):
-            yield chunk
+        try:
+            for chunk in chat_with_ai_stream(
+                prepared["conversation_snapshot"],
+                prepared["context_snapshot"]
+            ):
+                if first_chunk_at is None:
+                    first_chunk_at = time.perf_counter()
+                    logger.info(
+                        "[PERF] stream_reply first_chunk ttft=%.3fs",
+                        first_chunk_at - started_at,
+                    )
+                yield chunk
+        finally:
+            logger.info(
+                "[PERF] stream_reply complete total=%.3fs had_chunk=%s",
+                time.perf_counter() - started_at,
+                first_chunk_at is not None,
+            )
 
     def finalize_turn(self, prepared, raw_reply):
         """
-        回复打印完之后的收尾工作：
-        - 清洗回复文本
-        - 更新情绪
-        - 提取事件、更新关系（这两步不影响用户已经看到的回复，放在打印之后做即可）
-        - 记录助手消息、同步 context
+        快速收尾：清洗回复并立即保存助手消息，然后把慢后处理放入
+        顺序后台队列。返回后 GUI 即可恢复输入。
 
         返回清洗后的 reply，方便 main.py 需要时使用。
         """
+        started_at = time.perf_counter()
         router_reply = prepared["router_reply"]
         clean_message = prepared["clean_message"]
 
         reply = router_reply if router_reply else (clean_reply(raw_reply) if raw_reply else "")
 
-        # extract_event 是 AI 调用，可能要等几秒，不应该占着锁不放，
-        # 否则会让 InitiativeEngine 的后台检查白等。先在锁外面把结果算出来。
+        with self.lock:
+            # 记录助手消息
+            self.conversation_history.append({"role": "assistant", "content": reply})
+            self.conversation_history, overflow = save_memory(self.conversation_history)
+            self._pending_overflow.extend(overflow)
+            overflow_to_queue = list(self._pending_overflow)
+            self._pending_overflow.clear()
+
+        if overflow_to_queue:
+            queue_summary_messages(overflow_to_queue)
+
+        if self._postprocess_accepting:
+            self._postprocess_queue.put({
+                "clean_message": clean_message,
+                "reply": reply,
+                "router_reply": router_reply,
+            })
+
+        logger.info(
+            "[PERF] finalize_turn fast_commit duration=%.4fs queued_postprocess=%s",
+            time.perf_counter() - started_at,
+            self._postprocess_accepting,
+        )
+
+        return reply
+
+    def _postprocess_loop(self):
+        while True:
+            task = self._postprocess_queue.get()
+            try:
+                if task is None:
+                    return
+                self._postprocess_turn(task)
+            except Exception as e:
+                logger.error("对话后处理失败（已忽略，继续下一轮）：%s", e)
+            finally:
+                self._postprocess_queue.task_done()
+
+    def _postprocess_turn(self, task):
+        started_at = time.perf_counter()
+        router_reply = task["router_reply"]
         event = None
+        event_duration = 0.0
         if not router_reply:
+            event_started_at = time.perf_counter()
             event = extract_event(
                 self.config['api_key'],
                 self.config['model'],
-                clean_message,
-                reply
+                task["clean_message"],
+                task["reply"],
+                self.config.get("base_url"),
             )
+            event_duration = time.perf_counter() - event_started_at
 
         with self.lock:
-            # 更新情绪状态（依据 event 的 AI 判断结果，而不是关键词匹配）
             self.emotion = update_emotion(self.emotion, event)
             save_emotion(self.emotion)
 
-            # 更新关系状态（router 命中的精确回复不算"事件"，event 为 None 时也安全跳过）
             if not router_reply:
                 save_event(event)
                 self.relationship = update_relationship(self.relationship, event)
                 save_relationship(self.relationship)
 
-            # 记录助手消息
-            self.conversation_history.append({"role": "assistant", "content": reply})
-            self.conversation_history, overflow = save_memory(self.conversation_history)
-            self._pending_overflow.extend(overflow)
-
             self.context.update(self.emotion, self.profile, self.relationship)
 
-        # 长期摘要是个AI调用，挪到锁外、回复已经显示给用户之后才做，
-        # 不阻塞下一轮输入，也不占着锁让 InitiativeEngine 白等。
-        if self._pending_overflow:
-            summarize_overflow(
-                self.config['api_key'],
-                self.config['model'],
-                self._pending_overflow
-            )
-            self._pending_overflow = []
+        if self.on_state_updated:
+            try:
+                self.on_state_updated()
+            except Exception as e:
+                logger.warning("通知界面状态更新失败：%s", e)
 
-        return reply
+        summary_started_at = time.perf_counter()
+        summarized = summarize_pending_if_ready(
+            self.config['api_key'],
+            self.config['model'],
+            self.config.get("base_url"),
+        )
+        logger.info(
+            "[PERF] postprocess_turn event=%.3fs summary_check=%.3fs summarized=%s total=%.3fs",
+            event_duration,
+            time.perf_counter() - summary_started_at,
+            summarized,
+            time.perf_counter() - started_at,
+        )
 
     def shutdown(self):
+        if self._postprocess_accepting:
+            self._postprocess_accepting = False
+            self.on_state_updated = None
+            self._postprocess_queue.put(None)
+        self._postprocess_thread.join(timeout=2)
         self._executor.shutdown(wait=False)

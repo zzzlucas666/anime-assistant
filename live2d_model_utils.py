@@ -3,9 +3,21 @@
 import json
 import os
 
+from app_paths import resolve_project_path
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
+
+
+def resolve_live2d_model_path(configured_path):
+    """解析并验证 Live2D 模型路径。未配置或文件不存在时返回 None。"""
+    path = resolve_project_path(configured_path)
+    if path is None:
+        return None
+    if not path.is_file():
+        logger.warning("Live2D 模型文件不存在，将使用纯聊天界面：%s", path)
+        return None
+    return str(path)
 
 
 def load_live2d_model_metadata(model_path):
@@ -16,18 +28,18 @@ def load_live2d_model_metadata(model_path):
     也方便之后把情绪映射写进配置，而不是在代码里猜资源名。
     """
     if not model_path:
-        return {"expressions": [], "motion_groups": []}
+        return {"expressions": [], "motion_groups": [], "parameters": []}
 
     if not os.path.exists(model_path):
         logger.warning("Live2D 模型文件不存在，跳过表情/动作元数据读取：%s", model_path)
-        return {"expressions": [], "motion_groups": []}
+        return {"expressions": [], "motion_groups": [], "parameters": []}
 
     try:
         with open(model_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
         logger.warning("读取 Live2D model3.json 失败，跳过表情/动作元数据读取：%s", e)
-        return {"expressions": [], "motion_groups": []}
+        return {"expressions": [], "motion_groups": [], "parameters": []}
 
     refs = data.get("FileReferences", {})
     expressions = _extract_expression_names(refs.get("Expressions", []))

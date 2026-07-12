@@ -8,32 +8,50 @@
 应该在用户已经看到回复之后，在后台/锁外悄悄完成。
 """
 
-from openai import OpenAI
 import datetime
+import threading
+import time
 import uuid
+from ai.client import create_ai_client
+from app_paths import DATA_DIR
+from data_models import normalize_messages, normalize_summaries
 from Storage_utils import safe_load_json, safe_save_json
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
 
-SUMMARY_PATH = "data/long_term_summary.json"
+SUMMARY_PATH = str(DATA_DIR / "long_term_summary.json")
+PENDING_SUMMARY_PATH = str(DATA_DIR / "pending_summary.json")
 
 # 最多保留多少条摘要（每条摘要本身已经是浓缩过的内容，
 # 这个上限是防止摘要本身无限堆积）
 MAX_SUMMARIES = 30
+SUMMARY_BATCH_MESSAGE_COUNT = 10
+_pending_lock = threading.RLock()
+_summary_flush_lock = threading.Lock()
 
 
 def default_summaries():
     return []
 
 
+def default_pending_messages():
+    return []
+
+
 def load_summaries():
-    return safe_load_json(SUMMARY_PATH, default_summaries)
+    raw_summaries = safe_load_json(SUMMARY_PATH, default_summaries)
+    summaries = normalize_summaries(raw_summaries)
+    if summaries != raw_summaries:
+        safe_save_json(SUMMARY_PATH, summaries)
+    return summaries
 
 
 def save_summaries(summaries):
     # 摘要也不能无限增长，只保留最近的 MAX_SUMMARIES 条
-    safe_save_json(SUMMARY_PATH, summaries[-MAX_SUMMARIES:])
+    normalized = normalize_summaries(summaries)[-MAX_SUMMARIES:]
+    summaries[:] = normalized
+    return safe_save_json(SUMMARY_PATH, summaries)
 
 
 def get_summary_text(limit=5):
@@ -49,7 +67,51 @@ def get_summary_text(limit=5):
     return "\n".join(lines)
 
 
-def summarize_overflow(api_key, model, overflow_messages):
+def load_pending_summary_messages():
+    with _pending_lock:
+        raw_messages = safe_load_json(PENDING_SUMMARY_PATH, default_pending_messages)
+        messages = normalize_messages(raw_messages)
+        if messages != raw_messages:
+            safe_save_json(PENDING_SUMMARY_PATH, messages)
+        return messages
+
+
+def queue_summary_messages(messages):
+    """把溢出历史先持久化，达到批量阈值后再发起摘要 API。"""
+    normalized = normalize_messages(messages)
+    if not normalized:
+        return len(load_pending_summary_messages())
+    with _pending_lock:
+        pending = load_pending_summary_messages()
+        pending.extend(normalized)
+        safe_save_json(PENDING_SUMMARY_PATH, pending)
+        logger.info("长期摘要待处理消息：%d/%d", len(pending), SUMMARY_BATCH_MESSAGE_COUNT)
+        return len(pending)
+
+
+def summarize_pending_if_ready(api_key, model, base_url=None, batch_size=SUMMARY_BATCH_MESSAGE_COUNT):
+    """如果待处理消息达到 batch_size，在当前后台线程中生成一批摘要。"""
+    with _summary_flush_lock:
+        with _pending_lock:
+            pending = load_pending_summary_messages()
+            if len(pending) < batch_size:
+                return False
+            batch = pending[:batch_size]
+
+        result = summarize_overflow(api_key, model, batch, base_url)
+        if result is None:
+            # API 失败时保留待处理数据，下次再试。
+            return False
+
+        with _pending_lock:
+            current = load_pending_summary_messages()
+            if current[:len(batch)] == batch:
+                del current[:len(batch)]
+                safe_save_json(PENDING_SUMMARY_PATH, current)
+        return True
+
+
+def summarize_overflow(api_key, model, overflow_messages, base_url=None):
     """
     把即将被截断丢弃的旧对话压缩成一段摘要。
 
@@ -70,11 +132,9 @@ def summarize_overflow(api_key, model, overflow_messages):
     if not conversation_text.strip():
         return None
 
+    started_at = time.perf_counter()
     try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.deepseek.com"
-        )
+        client = create_ai_client(api_key, base_url)
 
         prompt = f"""
 请把下面这段对话历史压缩成一段简短的摘要（100字以内），
@@ -104,7 +164,12 @@ def summarize_overflow(api_key, model, overflow_messages):
         return None
 
     if not summary_text:
-        return None
+        logger.info(
+            "[PERF] 长期摘要 messages=%d duration=%.3fs result=empty",
+            len(overflow_messages),
+            time.perf_counter() - started_at,
+        )
+        return {}
 
     summary = {
         "id": uuid.uuid4().hex,
@@ -118,4 +183,9 @@ def summarize_overflow(api_key, model, overflow_messages):
     save_summaries(summaries)
 
     logger.info("已生成长期摘要：%s", summary_text)
+    logger.info(
+        "[PERF] 长期摘要 messages=%d duration=%.3fs result=saved",
+        len(overflow_messages),
+        time.perf_counter() - started_at,
+    )
     return summary

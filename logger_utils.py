@@ -7,7 +7,7 @@
     logger.warning("xxx 调用失败：%s", e)
 
 设计：
-- 日志统一写到 data/app.log，方便事后排查（尤其是后台线程里发生的问题，
+- 日志统一写到项目 data/app.log，方便事后排查（尤其是后台线程里发生的问题，
   控制台可能根本看不到）
 - 同时也会打印到控制台（级别 WARNING 以上才打印，避免刷屏），
   保留"出问题时終端也能看到"的体验
@@ -18,7 +18,9 @@
 import logging
 import os
 
-LOG_PATH = "data/app.log"
+from app_paths import DATA_DIR
+
+LOG_PATH = str(DATA_DIR / "app.log")
 _initialized_loggers = set()
 
 
