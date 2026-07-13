@@ -12,6 +12,9 @@ from config_loader import (
     DEFAULT_CONFIG,
     load_config,
     save_live2d_parameter_preset,
+    save_live2d_waiting_gaze_intensity,
+    save_live2d_waiting_motion_intensity,
+    save_live2d_waiting_motion_speed,
 )
 from live2d_model_utils import resolve_live2d_model_path
 
@@ -46,8 +49,19 @@ class ConfigurationAndPathTests(unittest.TestCase):
             loaded = load_config(config_path)
 
         self.assertEqual(loaded["base_url"], DEFAULT_CONFIG["base_url"])
+        self.assertFalse(loaded["chat_thinking_enabled"])
+        self.assertEqual(loaded["chat_history_max_messages"], 8)
         self.assertEqual(loaded["live2d_model_path"], "")
+        self.assertEqual(loaded["live2d_waiting_motion_intensity"], 1.0)
+        self.assertEqual(loaded["live2d_waiting_gaze_intensity"], 1.0)
+        self.assertEqual(loaded["live2d_waiting_motion_speed"], 1.4)
         self.assertEqual(loaded["proactive_max_per_day"], 7)
+        self.assertTrue(loaded["tts_enabled"])
+        self.assertTrue(loaded["tts_translate_to_japanese"])
+        self.assertEqual(loaded["aivis_endpoint"], "http://127.0.0.1:10101")
+        self.assertEqual(loaded["aivis_timeout_seconds"], 60.0)
+        self.assertEqual(loaded["aivis_max_chars_per_request"], 56)
+        self.assertEqual(loaded["aivis_mood_speakers"]["tired"], 1878365379)
 
     def test_live2d_parameter_preset_is_saved_without_losing_config(self):
         config = {
@@ -73,6 +87,55 @@ class ConfigurationAndPathTests(unittest.TestCase):
             persisted["live2d_parameter_map"]["sad"],
             {"ParamMouthForm": -0.27},
         )
+
+    def test_waiting_motion_intensity_is_saved_and_clamped(self):
+        config = {
+            "api_key": "secret-key",
+            "model": "test-model",
+            "assistant_name": "Mio",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "settings.json"
+            saved = save_live2d_waiting_motion_intensity(
+                config, 3.5, config_path
+            )
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(saved)
+        self.assertEqual(persisted["live2d_waiting_motion_intensity"], 2.0)
+        self.assertEqual(persisted["api_key"], "secret-key")
+
+    def test_waiting_gaze_intensity_is_saved_and_clamped(self):
+        config = {
+            "api_key": "secret-key",
+            "model": "test-model",
+            "assistant_name": "Mio",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "settings.json"
+            saved = save_live2d_waiting_gaze_intensity(
+                config, -1.0, config_path
+            )
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(saved)
+        self.assertEqual(persisted["live2d_waiting_gaze_intensity"], 0.0)
+
+    def test_waiting_motion_speed_is_saved_and_clamped(self):
+        config = {
+            "api_key": "secret-key",
+            "model": "test-model",
+            "assistant_name": "Mio",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "settings.json"
+            saved = save_live2d_waiting_motion_speed(
+                config, 5.0, config_path
+            )
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(saved)
+        self.assertEqual(persisted["live2d_waiting_motion_speed"], 2.0)
 
     def test_persona_load_does_not_depend_on_current_working_directory(self):
         previous_cwd = Path.cwd()
