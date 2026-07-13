@@ -278,11 +278,76 @@ def normalize_app_config(value, defaults):
     value = value if isinstance(value, dict) else {}
     result = {**defaults, **value}
 
-    for key in ("api_key", "model", "assistant_name", "base_url", "live2d_model_path"):
+    for key in (
+        "api_key", "model", "assistant_name", "base_url", "live2d_model_path",
+        "aivis_endpoint",
+    ):
         result[key] = _clean_string(result.get(key), _clean_string(defaults.get(key)))
+
+    result["tts_enabled"] = _boolean(
+        result.get("tts_enabled"), defaults.get("tts_enabled", False)
+    )
+    result["chat_thinking_enabled"] = _boolean(
+        result.get("chat_thinking_enabled"),
+        defaults.get("chat_thinking_enabled", False),
+    )
+    result["chat_history_max_messages"] = _integer(
+        result.get("chat_history_max_messages"),
+        defaults.get("chat_history_max_messages", 8),
+        2,
+        20,
+    )
+    result["tts_translate_to_japanese"] = _boolean(
+        result.get("tts_translate_to_japanese"),
+        defaults.get("tts_translate_to_japanese", True),
+    )
+    result["tts_speed_scale"] = _number(
+        result.get("tts_speed_scale"), defaults.get("tts_speed_scale", 1.0), 0.5, 2.0
+    )
+    result["tts_volume_scale"] = _number(
+        result.get("tts_volume_scale"), defaults.get("tts_volume_scale", 1.0), 0.0, 2.0
+    )
+    result["aivis_timeout_seconds"] = _number(
+        result.get("aivis_timeout_seconds"),
+        defaults.get("aivis_timeout_seconds", 60.0),
+        1.0,
+        120.0,
+    )
+    result["aivis_max_chars_per_request"] = _integer(
+        result.get("aivis_max_chars_per_request"),
+        defaults.get("aivis_max_chars_per_request", 56),
+        20,
+        120,
+    )
+    default_speakers = defaults.get("aivis_mood_speakers", {})
+    configured_speakers = result.get("aivis_mood_speakers")
+    if not isinstance(configured_speakers, dict):
+        configured_speakers = {}
+    result["aivis_mood_speakers"] = {
+        mood: _integer(configured_speakers.get(mood), speaker_id, 0)
+        for mood, speaker_id in default_speakers.items()
+    }
 
     result["live2d_expression_intensity"] = _number(
         result.get("live2d_expression_intensity"), defaults["live2d_expression_intensity"], 0.0, 10.0
+    )
+    result["live2d_waiting_motion_intensity"] = _number(
+        result.get("live2d_waiting_motion_intensity"),
+        defaults.get("live2d_waiting_motion_intensity", 1.0),
+        0.0,
+        2.0,
+    )
+    result["live2d_waiting_gaze_intensity"] = _number(
+        result.get("live2d_waiting_gaze_intensity"),
+        defaults.get("live2d_waiting_gaze_intensity", 1.0),
+        0.0,
+        2.0,
+    )
+    result["live2d_waiting_motion_speed"] = _number(
+        result.get("live2d_waiting_motion_speed"),
+        defaults.get("live2d_waiting_motion_speed", 1.4),
+        0.5,
+        2.0,
     )
     for key in ("live2d_expression_map", "live2d_motion_map", "live2d_parameter_map"):
         if not isinstance(result.get(key), dict):

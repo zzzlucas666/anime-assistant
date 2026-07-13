@@ -112,9 +112,13 @@ class DataModelTests(unittest.TestCase):
             "assistant_name": " name ",
             "proactive_check_interval_minutes": 0,
             "proactive_max_per_day": "500",
+            "chat_thinking_enabled": "true",
+            "chat_history_max_messages": "500",
             "live2d_expression_map": [],
         }, DEFAULT_CONFIG)
         self.assertEqual(config["api_key"], "key")
+        self.assertTrue(config["chat_thinking_enabled"])
+        self.assertEqual(config["chat_history_max_messages"], 20)
         self.assertEqual(config["proactive_check_interval_minutes"], 0.1)
         self.assertEqual(config["proactive_max_per_day"], 100)
         self.assertEqual(config["live2d_expression_map"], {})

@@ -8,6 +8,12 @@ from app_paths import CONFIG_DIR
 from data_models import normalize_app_config
 from logger_utils import get_logger
 from Storage_utils import safe_save_json
+from tts_service import (
+    DEFAULT_AIVIS_ENDPOINT,
+    DEFAULT_AIVIS_MAX_CHARS,
+    DEFAULT_AIVIS_TIMEOUT_SECONDS,
+    DEFAULT_MOOD_SPEAKERS,
+)
 
 logger = get_logger(__name__)
 
@@ -15,11 +21,24 @@ REQUIRED_FIELDS = ["api_key", "model", "assistant_name"]
 
 DEFAULT_CONFIG = {
     "base_url": DEFAULT_BASE_URL,
+    "chat_thinking_enabled": False,
+    "chat_history_max_messages": 8,
     "live2d_model_path": "",
     "live2d_expression_intensity": 1.25,
+    "live2d_waiting_motion_intensity": 1.0,
+    "live2d_waiting_gaze_intensity": 1.0,
+    "live2d_waiting_motion_speed": 1.4,
     "live2d_expression_map": {},
     "live2d_motion_map": {},
     "live2d_parameter_map": {},
+    "tts_enabled": True,
+    "tts_translate_to_japanese": True,
+    "tts_speed_scale": 1.0,
+    "tts_volume_scale": 1.0,
+    "aivis_endpoint": DEFAULT_AIVIS_ENDPOINT,
+    "aivis_timeout_seconds": DEFAULT_AIVIS_TIMEOUT_SECONDS,
+    "aivis_max_chars_per_request": DEFAULT_AIVIS_MAX_CHARS,
+    "aivis_mood_speakers": DEFAULT_MOOD_SPEAKERS.copy(),
     "proactive_check_interval_minutes": 5,
     "proactive_idle_threshold_minutes": 30,
     "proactive_min_interval_minutes": 120,
@@ -81,5 +100,50 @@ def save_live2d_parameter_preset(config, mood, parameters, config_path=None):
         config["live2d_parameter_map"] = parameter_map
     parameter_map[mood] = cleaned
 
+    path = Path(config_path) if config_path else CONFIG_DIR / "settings.json"
+    return safe_save_json(str(path), config)
+
+
+def save_live2d_waiting_motion_intensity(config, intensity, config_path=None):
+    """保存待机摆头/头发物理动作的整体倍率。"""
+    if not isinstance(config, dict):
+        return False
+    try:
+        intensity = float(intensity)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(intensity):
+        return False
+    config["live2d_waiting_motion_intensity"] = max(0.0, min(2.0, intensity))
+    path = Path(config_path) if config_path else CONFIG_DIR / "settings.json"
+    return safe_save_json(str(path), config)
+
+
+def save_live2d_waiting_gaze_intensity(config, intensity, config_path=None):
+    """保存等待语音时眼睛游移幅度的整体倍率。"""
+    if not isinstance(config, dict):
+        return False
+    try:
+        intensity = float(intensity)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(intensity):
+        return False
+    config["live2d_waiting_gaze_intensity"] = max(0.0, min(2.0, intensity))
+    path = Path(config_path) if config_path else CONFIG_DIR / "settings.json"
+    return safe_save_json(str(path), config)
+
+
+def save_live2d_waiting_motion_speed(config, speed, config_path=None):
+    """保存待机动作整体速度倍率。"""
+    if not isinstance(config, dict):
+        return False
+    try:
+        speed = float(speed)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(speed):
+        return False
+    config["live2d_waiting_motion_speed"] = max(0.5, min(2.0, speed))
     path = Path(config_path) if config_path else CONFIG_DIR / "settings.json"
     return safe_save_json(str(path), config)

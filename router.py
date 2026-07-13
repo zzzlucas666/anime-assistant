@@ -2,6 +2,16 @@ def handle_intent(intent, clean_message, profile, emotion, relationship):
 
     if intent == "get_profile":
 
+        # 防御性保护：即使上游 AI 意图分类失误，询问 Mio 本人喜好时也应
+        # 回到自然聊天，不能拿用户资料回答“你喜欢什么”。
+        assistant_preference_patterns = (
+            "你喜欢", "你最喜欢", "你爱什么", "你讨厌", "你不喜欢",
+            "你的喜好", "你的兴趣", "你的理想型",
+            "喜欢什么样的男生", "喜欢什么样的女生", "喜欢什么样的人",
+        )
+        if any(pattern in clean_message for pattern in assistant_preference_patterns):
+            return None
+
         likes = profile.get("likes", [])
         dislikes = profile.get("dislikes", [])
         nickname = profile.get("nickname", "")

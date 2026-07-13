@@ -57,6 +57,12 @@ class Live2DParameterTuner(QDialog):
         recommended_map,
         current_mood="neutral",
         save_callback=None,
+        waiting_motion_intensity=1.0,
+        save_waiting_motion_callback=None,
+        waiting_gaze_intensity=1.0,
+        save_waiting_gaze_callback=None,
+        waiting_motion_speed=1.4,
+        save_waiting_motion_speed_callback=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -67,6 +73,18 @@ class Live2DParameterTuner(QDialog):
         }
         self.recommended_map = recommended_map or {}
         self.save_callback = save_callback
+        self.save_waiting_motion_callback = save_waiting_motion_callback
+        self.save_waiting_gaze_callback = save_waiting_gaze_callback
+        self.save_waiting_motion_speed_callback = save_waiting_motion_speed_callback
+        self.saved_waiting_motion_intensity = max(
+            0.0, min(2.0, float(waiting_motion_intensity))
+        )
+        self.saved_waiting_gaze_intensity = max(
+            0.0, min(2.0, float(waiting_gaze_intensity))
+        )
+        self.saved_waiting_motion_speed = max(
+            0.5, min(2.0, float(waiting_motion_speed))
+        )
         self.sliders = {}
         self.value_labels = {}
         self.spec_by_id = {spec[0]: spec for spec in PARAMETER_SPECS}
@@ -74,6 +92,16 @@ class Live2DParameterTuner(QDialog):
         self.setWindowTitle("Live2D 表情参数调试")
         self.resize(590, 720)
         self._build_ui(current_mood)
+        self.controller.set_waiting_motion_intensity(
+            self.saved_waiting_motion_intensity
+        )
+        self.controller.set_waiting_gaze_intensity(
+            self.saved_waiting_gaze_intensity
+        )
+        self.controller.set_waiting_motion_speed(
+            self.saved_waiting_motion_speed
+        )
+        self.controller.set_waiting_motion_preview(True)
         self._load_selected_mood()
 
     def _build_ui(self, current_mood):
@@ -96,6 +124,69 @@ class Live2DParameterTuner(QDialog):
         )
         hint.setWordWrap(True)
         root.addWidget(hint)
+
+        waiting_row = QHBoxLayout()
+        waiting_row.addWidget(QLabel("待机摆头/头发强度"))
+        self.waiting_motion_slider = QSlider(Qt.Horizontal)
+        self.waiting_motion_slider.setRange(0, 200)
+        self.waiting_motion_slider.setValue(
+            round(self.saved_waiting_motion_intensity * 100)
+        )
+        self.waiting_motion_slider.valueChanged.connect(
+            self._on_waiting_motion_changed
+        )
+        self.waiting_motion_value_label = QLabel(
+            f"{self.saved_waiting_motion_intensity:.2f}×"
+        )
+        self.waiting_motion_value_label.setMinimumWidth(52)
+        save_waiting_button = QPushButton("保存待机强度")
+        save_waiting_button.clicked.connect(self._save_waiting_motion)
+        waiting_row.addWidget(self.waiting_motion_slider, 1)
+        waiting_row.addWidget(self.waiting_motion_value_label)
+        waiting_row.addWidget(save_waiting_button)
+        root.addLayout(waiting_row)
+
+        gaze_row = QHBoxLayout()
+        gaze_row.addWidget(QLabel("待机视线游移强度"))
+        self.waiting_gaze_slider = QSlider(Qt.Horizontal)
+        self.waiting_gaze_slider.setRange(0, 200)
+        self.waiting_gaze_slider.setValue(
+            round(self.saved_waiting_gaze_intensity * 100)
+        )
+        self.waiting_gaze_slider.valueChanged.connect(
+            self._on_waiting_gaze_changed
+        )
+        self.waiting_gaze_value_label = QLabel(
+            f"{self.saved_waiting_gaze_intensity:.2f}×"
+        )
+        self.waiting_gaze_value_label.setMinimumWidth(52)
+        save_gaze_button = QPushButton("保存视线强度")
+        save_gaze_button.clicked.connect(self._save_waiting_gaze)
+        gaze_row.addWidget(self.waiting_gaze_slider, 1)
+        gaze_row.addWidget(self.waiting_gaze_value_label)
+        gaze_row.addWidget(save_gaze_button)
+        root.addLayout(gaze_row)
+
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("待机动作速度"))
+        self.waiting_motion_speed_slider = QSlider(Qt.Horizontal)
+        self.waiting_motion_speed_slider.setRange(50, 200)
+        self.waiting_motion_speed_slider.setValue(
+            round(self.saved_waiting_motion_speed * 100)
+        )
+        self.waiting_motion_speed_slider.valueChanged.connect(
+            self._on_waiting_motion_speed_changed
+        )
+        self.waiting_motion_speed_value_label = QLabel(
+            f"{self.saved_waiting_motion_speed:.2f}×"
+        )
+        self.waiting_motion_speed_value_label.setMinimumWidth(52)
+        save_speed_button = QPushButton("保存动作速度")
+        save_speed_button.clicked.connect(self._save_waiting_motion_speed)
+        speed_row.addWidget(self.waiting_motion_speed_slider, 1)
+        speed_row.addWidget(self.waiting_motion_speed_value_label)
+        speed_row.addWidget(save_speed_button)
+        root.addLayout(speed_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -212,10 +303,87 @@ class Live2DParameterTuner(QDialog):
         else:
             self.status_label.setText("保存失败，请查看日志。")
 
+    def _on_waiting_motion_changed(self, slider_value):
+        intensity = slider_value / 100.0
+        applied = self.controller.set_waiting_motion_intensity(intensity)
+        self.waiting_motion_value_label.setText(f"{applied:.2f}×")
+        self.status_label.setText("正在实时预览待机动作，尚未保存。")
+
+    def _save_waiting_motion(self):
+        intensity = self.waiting_motion_slider.value() / 100.0
+        saved = bool(
+            self.save_waiting_motion_callback
+            and self.save_waiting_motion_callback(intensity)
+        )
+        if saved:
+            self.saved_waiting_motion_intensity = intensity
+            self.controller.set_waiting_motion_intensity(intensity)
+            self.status_label.setText(
+                f"待机摆头/头发强度已保存为 {intensity:.2f}×。"
+            )
+        else:
+            self.status_label.setText("待机动作强度保存失败，请查看日志。")
+
+    def _on_waiting_gaze_changed(self, slider_value):
+        intensity = slider_value / 100.0
+        applied = self.controller.set_waiting_gaze_intensity(intensity)
+        self.waiting_gaze_value_label.setText(f"{applied:.2f}×")
+        self.status_label.setText("正在实时预览待机视线，尚未保存。")
+
+    def _save_waiting_gaze(self):
+        intensity = self.waiting_gaze_slider.value() / 100.0
+        saved = bool(
+            self.save_waiting_gaze_callback
+            and self.save_waiting_gaze_callback(intensity)
+        )
+        if saved:
+            self.saved_waiting_gaze_intensity = intensity
+            self.controller.set_waiting_gaze_intensity(intensity)
+            self.status_label.setText(
+                f"待机视线游移强度已保存为 {intensity:.2f}×。"
+            )
+        else:
+            self.status_label.setText("待机视线强度保存失败，请查看日志。")
+
+    def _on_waiting_motion_speed_changed(self, slider_value):
+        speed = slider_value / 100.0
+        applied = self.controller.set_waiting_motion_speed(speed)
+        self.waiting_motion_speed_value_label.setText(f"{applied:.2f}×")
+        self.status_label.setText("正在实时预览待机动作速度，尚未保存。")
+
+    def _save_waiting_motion_speed(self):
+        speed = self.waiting_motion_speed_slider.value() / 100.0
+        saved = bool(
+            self.save_waiting_motion_speed_callback
+            and self.save_waiting_motion_speed_callback(speed)
+        )
+        if saved:
+            self.saved_waiting_motion_speed = speed
+            self.controller.set_waiting_motion_speed(speed)
+            self.status_label.setText(
+                f"待机动作速度已保存为 {speed:.2f}×。"
+            )
+        else:
+            self.status_label.setText("待机动作速度保存失败，请查看日志。")
+
+    def _finish_waiting_motion_preview(self):
+        self.controller.set_waiting_motion_preview(False)
+        self.controller.set_waiting_motion_intensity(
+            self.saved_waiting_motion_intensity
+        )
+        self.controller.set_waiting_gaze_intensity(
+            self.saved_waiting_gaze_intensity
+        )
+        self.controller.set_waiting_motion_speed(
+            self.saved_waiting_motion_speed
+        )
+
     def done(self, result):
         self.controller.clear_parameter_preview()
+        self._finish_waiting_motion_preview()
         super().done(result)
 
     def closeEvent(self, event):
         self.controller.clear_parameter_preview()
+        self._finish_waiting_motion_preview()
         super().closeEvent(event)
