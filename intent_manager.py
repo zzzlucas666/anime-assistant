@@ -81,6 +81,17 @@ def _looks_like_emotion_query(user_message):
     return _contains_any(user_message, short_query_keywords)
 
 
+def _looks_like_assistant_preference_query(user_message):
+    """判断用户是在问 Mio 自己的喜好，而不是查询用户资料。"""
+    direct_patterns = (
+        "你喜欢", "你最喜欢", "你爱什么", "你讨厌", "你不喜欢",
+        "你的喜好", "你的兴趣", "你感兴趣", "你的理想型",
+        "喜欢什么样的男生", "喜欢什么样的女生", "喜欢什么样的人",
+        "喜欢哪种男生", "喜欢哪种女生", "喜欢哪种人",
+    )
+    return _contains_any(user_message, direct_patterns)
+
+
 def _maybe_special_intent(user_message):
     """
     判断“可能有特殊意图，但本地规则不够确定”的句子。
@@ -117,6 +128,11 @@ def _local_detect_intent(user_message):
 
     if _looks_like_profile_query(user_message):
         return _result("get_profile", 0.95)
+
+    # “你喜欢什么 / 你喜欢什么样的人”是在问角色自身，必须走自然聊天。
+    # 放在 profile_query 后面，可保留“你记得我喜欢什么吗”查询用户记忆的语义。
+    if _looks_like_assistant_preference_query(user_message):
+        return _result("chat", 0.98)
 
     if _looks_like_profile_set(user_message):
         return _result("set_profile", 0.95)
@@ -158,13 +174,14 @@ def detect_intent(api_key, model, user_message, emotion, profile, base_url=None)
 可选intent：
 
 1. get_profile
-   - 用户在询问个人信息（喜欢/讨厌/昵称/名字）
+   - 用户明确在询问“自己”的已保存信息（我喜欢什么/我叫什么/我的昵称）
 
 2. set_profile
    - 用户在表达新信息（我喜欢，我讨厌，我叫）
 
 3. chat
    - 普通聊天
+   - 用户询问角色自身的喜好、兴趣、理想型，例如“你喜欢什么”“你喜欢什么样的男生”
 
 4. emotion_query
    - 用户在询问情绪状态
@@ -193,6 +210,7 @@ def detect_intent(api_key, model, user_message, emotion, profile, base_url=None)
 - 不要解释
 - 不要markdown
 - confidence必须是0~1数字
+- 必须区分“我喜欢什么”（get_profile）和“你喜欢什么”（chat）
 """
 
     try:

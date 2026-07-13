@@ -1,9 +1,17 @@
+from pathlib import Path
+
 from Storage_utils import safe_load_json, safe_save_json
+from ai.fallbacks import is_transient_fallback
 from app_paths import DATA_DIR
 from data_models import normalize_messages
+from logger_utils import get_logger
+
+
+logger = get_logger(__name__)
 
 MEMORY_PATH = str(DATA_DIR / "conversation_history.json")
 MAX_HISTORY = 50
+STYLE_HISTORY_VERSION = 2
 
 
 def default_history():
@@ -11,7 +19,66 @@ def default_history():
 
 
 def clean_history(history):
-    return normalize_messages(history)
+    return [
+        message
+        for message in normalize_messages(history)
+        if not (
+            message["role"] == "assistant"
+            and is_transient_fallback(message["content"])
+        )
+    ]
+
+
+def _style_migration_paths():
+    memory_path = Path(MEMORY_PATH)
+    marker_path = memory_path.with_name(
+        f"{memory_path.stem}.style-v{STYLE_HISTORY_VERSION}.json"
+    )
+    backup_path = memory_path.with_name(
+        f"{memory_path.stem}.pre-mio-style-v{STYLE_HISTORY_VERSION}.json"
+    )
+    return str(marker_path), str(backup_path)
+
+
+def _looks_style_polluted(history):
+    """识别旧版长篇、音乐比喻密集的助手历史，避免误清理正常新对话。"""
+    assistant_messages = [
+        item["content"] for item in history if item.get("role") == "assistant"
+    ]
+    if len(assistant_messages) < 5:
+        return False
+    average_length = sum(map(len, assistant_messages)) / len(assistant_messages)
+    music_heavy = sum(
+        any(term in content for term in ("贝斯", "琴弦", "低音"))
+        for content in assistant_messages
+    )
+    return average_length > 90 or music_heavy >= 3
+
+
+def _migrate_legacy_style_history(raw_history):
+    """首次升级到新口吻时备份并重置受污染的短期历史。"""
+    marker_path, backup_path = _style_migration_paths()
+    marker = safe_load_json(marker_path, lambda: {})
+    if marker.get("version") == STYLE_HISTORY_VERSION:
+        return raw_history
+
+    normalized = clean_history(raw_history)
+    if _looks_style_polluted(normalized):
+        if not safe_save_json(backup_path, raw_history):
+            logger.error("旧风格历史备份失败，已取消自动重置：%s", backup_path)
+            return raw_history
+        if not safe_save_json(MEMORY_PATH, []):
+            logger.error("短期历史重置失败，将继续使用原历史。")
+            return raw_history
+        raw_history = []
+        logger.info(
+            "已备份并重置旧风格短期历史：messages=%d backup=%s",
+            len(normalized),
+            backup_path,
+        )
+
+    safe_save_json(marker_path, {"version": STYLE_HISTORY_VERSION})
+    return raw_history
 
 
 def save_memory(conversation_history):
@@ -41,7 +108,8 @@ def save_memory(conversation_history):
 
 def load_memory():
     raw_history = safe_load_json(MEMORY_PATH, default_history)
-    history = normalize_messages(raw_history)
+    raw_history = _migrate_legacy_style_history(raw_history)
+    history = clean_history(raw_history)
     if history != raw_history:
         safe_save_json(MEMORY_PATH, history)
     return history

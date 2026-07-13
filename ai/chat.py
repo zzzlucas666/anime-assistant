@@ -1,6 +1,8 @@
 import json
+import re
 import time
 from ai.client import create_ai_client
+from ai.fallbacks import FALLBACK_REPLIES
 from app_paths import DATA_DIR
 from context_builder import build_memory_context
 from logger_utils import get_logger
@@ -111,6 +113,11 @@ def build_system_prompt(context, query_text=None):
 （这是很久以前聊过的内容的概括，印象比较模糊，不要假装记得很清楚的细节，
 只在话题自然相关时模糊地提一下；跟当前话题无关时完全忽略）
 
+# 【关于历史对话的使用方式】
+- 历史内容只用于记住“聊过什么、发生过什么”，不用于模仿旧回复的文风
+- 如果历史里的助手回复很长、像散文、总提贝斯或包含虚构细节，忽略那种表达方式
+- 当前这轮的人设和口语规则优先级高于所有历史回复
+
 # 【核心行为规则】
 - 最高优先级：始终先接住对方刚才说的话、回答对方刚问的问题。
   上面的"近期值得记住的事情"和"长期记忆摘要"只是背景参考，
@@ -123,15 +130,32 @@ def build_system_prompt(context, query_text=None):
 - 除了回答“你叫什么”这类问题外，其余任何场合都不允许提及自己的名字，哪怕是开场白、害羞、卖萌或强调语气时也不要带出名字
 - 不允许说自己是AI或模型
 - 要像真实人类一样交流，像在用手机打字聊天，不是在写文章
+- 你首先是一个有自己生活、判断和情绪的女高中生，不是随叫随到、永远附和的客服
+- 可以温柔地不同意、认真提醒、觉得无奈或轻轻吐槽，不要对什么都夸赞
+- 除非对方正在聊音乐、乐队或练习，否则不要主动提贝斯、琴弦、低音或轻音部
+- 不得编造对话中没有出现的具体往事，例如演出事故、朋友动作、校园活动细节或约定
 
 # 【长度与格式（严格遵守）】
-- 每次回复最多 2~3 句话，禁止写成大段落或分点说明
+- 日常聊天通常只回复 1~2 句，总长度尽量控制在 12~55 个汉字
+- 只有确实需要解释或安慰时才允许第 3 句，总长度也不得超过约 80 个汉字
+- 先直接回答问题，不要为了营造气氛加入无关铺垫
 - 不使用换行分段、不使用列表符号（如 - 、• 、数字序号）
-- 不要写小说式旁白或场景描写
-- 括号动作描写最多用一次，且只在情绪非常强烈时使用，平时完全不用
+- 不写散文、小说式旁白、景色描写或连续比喻；不要使用“空气里……”“像……一样……”等文艺铺陈
+- 不要虚构朋友的动作、眼神、练习细节或没有出现在对话中的具体场景
+- 完全不使用括号动作描写或舞台说明；害羞、紧张和开心只通过自然说话表现
 - 每次回复最多使用 1 个 emoji，大多数时候不用 emoji
 - 结尾最多保留一个问题或反问，不要连续追问
-- 可以带一点害羞或傲娇语气，但不要堆砌语气词（比如不要连续用很多个“…”或“呜…”）
+- 不要每次结尾都反问用户，也不要机械地用昵称点名
+- 可以带一点害羞或认真语气，但不要堆砌语气词（比如不要连续用很多个“…”或“呜…”）
+
+# 【口语校准示例】
+- 问“喜欢什么样的人”：回答类似“嗯……大概是认真又温柔的人吧。能安静听别人说话，就很好了。”
+- 问“喜欢什么天气”：回答类似“我比较喜欢凉爽又安静的天气。下点小雨也不错，不过别太大就好。”
+- 问和朋友合奏的感觉：回答类似“和她们一起练习很开心。虽然偶尔会乱来，但大家认真起来还是很可靠的。”
+- 问“害怕很多人的目光吗”：回答类似“嗯，会怕……人一多我就容易紧张。不过熟悉以后会好一点。”
+- 对方夸你：回答类似“突、突然这么说干什么……不过，谢谢。”不要写脸红、低头或抱贝斯等动作
+- 对方做了不妥的事：可以回答“这样不太好吧。还是先认真道歉比较好。”不必温柔附和
+- 上述示例只用于控制简短、自然的口语风格，不要逐字照搬
 
 # 【关系驱动行为】
 
@@ -166,15 +190,12 @@ def build_system_prompt(context, query_text=None):
 - 不要频繁使用舞台剧式动作描写
 - 不要每句话都加括号
 - 保持自然对话感，宁可说少，不要说多
+
+# 【输出前自检】
+发送前检查一次：如果这只是日常闲聊，却超过 2 句或明显超过 55 个汉字，
+请删掉动作括号、景色、比喻、虚构细节、无关音乐元素和不必要的追问，
+改成一个真实女高中生会在聊天框里发出的简短口语。
 """
-
-# 主回复彻底失败时的兜底话术（角色内语气，不暴露"AI/系统错误"字眼）
-FALLBACK_REPLIES = [
-    "嗯…网络好像有点不稳定，刚才走神了，能再说一次吗？",
-    "抱歉…刚刚好像没听清，可以再说一遍吗？",
-    "嗯？信号好像有点问题…你刚才说什么？"
-]
-
 
 def _extract_latest_user_message(messages):
     """从消息列表里取出最后一条 role=user 的内容，用作语义检索的查询文本"""
@@ -182,6 +203,36 @@ def _extract_latest_user_message(messages):
         if msg.get("role") == "user":
             return msg.get("content")
     return None
+
+
+def _daily_chat_request_options(context, **options):
+    """为面向用户的角色对话补充 DeepSeek 日常聊天参数。"""
+    result = dict(options)
+    base_url = str(context["config"].get("base_url") or "").lower()
+    if "api.deepseek.com" in base_url:
+        thinking_enabled = context["config"].get("chat_thinking_enabled", False)
+        result["extra_body"] = {
+            "thinking": {"type": "enabled" if thinking_enabled else "disabled"}
+        }
+    return result
+
+
+def _normalize_short_character_line(text, max_chars=70):
+    """清掉舞台动作和多余换行，并为开场/主动消息提供最后一道长度保护。"""
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r"（.*?）|\(.*?\)", "", text, flags=re.DOTALL)
+    text = " ".join(text.split()).strip()
+    if len(text) <= max_chars:
+        return text
+
+    boundary = max(
+        (text.rfind(mark, 0, max_chars + 1) for mark in "。！？!?"),
+        default=-1,
+    )
+    if boundary >= 12:
+        return text[:boundary + 1]
+    return text[:max_chars].rstrip("，、；：… ") + "。"
 
 
 def _create_stream(messages, context):
@@ -200,11 +251,15 @@ def _create_stream(messages, context):
         {"role": "system", "content": system_prompt}
     ] + messages
 
-    stream = client.chat.completions.create(
+    request_options = _daily_chat_request_options(
+        context,
         model=context["config"]["model"],
         messages=full_messages,
-        stream=True
+        stream=True,
+        max_tokens=72,
     )
+
+    stream = client.chat.completions.create(**request_options)
     logger.info(
         "[PERF] chat_stream_setup prompt=%.3fs connect=%.3fs total=%.3fs",
         prompt_ready_at - started_at,
@@ -219,44 +274,67 @@ def chat_with_ai_stream(messages, context):
     流式调用 AI，逐块 yield 文本片段。
 
     容错策略：
-    - 如果"创建连接"这一步失败（网络/鉴权/限流等），自动重试一次；
-      仍然失败则 yield 一句角色内兜底话术，不让程序崩溃。
+    - 如果"创建连接"失败，或者连接正常结束却没有返回任何文字，
+      都会自动重试一次；仍然失败则 yield 一句角色内兜底话术。
     - 如果连接建立成功、已经开始吐字之后才中途断线，
       不会重试（避免内容重复），而是在已输出内容后补一句自然的收尾。
     """
     import random
 
-    stream = None
     last_error = None
 
-    for attempt in range(2):  # 最多尝试 2 次：首次 + 重试 1 次
+    for attempt in range(2):  # 最多尝试 2 次：首次 + 空流/异常重试 1 次
         try:
             stream = _create_stream(messages, context)
-            break
         except Exception as e:
             last_error = e
             logger.warning("创建对话流失败（第 %d 次尝试）：%s", attempt + 1, e)
+            continue
 
-    if stream is None:
-        logger.error("重试后仍失败，使用兜底话术。最后一次错误：%s", last_error)
-        yield random.choice(FALLBACK_REPLIES)
-        return
+        has_yielded_any = False
+        reasoning_chars = 0
+        finish_reasons = []
+        try:
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                reasoning_chars += len(
+                    getattr(delta, "reasoning_content", None) or ""
+                )
+                if choice.finish_reason:
+                    finish_reasons.append(choice.finish_reason)
+                if delta and delta.content:
+                    has_yielded_any = True
+                    yield delta.content
+        except Exception as e:
+            last_error = e
+            logger.warning("流式输出中途中断（第 %d 次尝试）：%s", attempt + 1, e)
+            if has_yielded_any:
+                # 已经说了一部分话，不重试（避免重复），自然收个尾
+                yield "…呃，网络突然卡了一下，先这样吧。"
+                return
+            continue
 
-    has_yielded_any = False
-    try:
-        for chunk in stream:
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                has_yielded_any = True
-                yield delta.content
-    except Exception as e:
-        logger.warning("流式输出中途中断：%s", e)
+        logger.info(
+            "对话流完成：attempt=%d content=%s reasoning_chars=%d finish=%s",
+            attempt + 1,
+            has_yielded_any,
+            reasoning_chars,
+            finish_reasons or ["unknown"],
+        )
+
         if has_yielded_any:
-            # 已经说了一部分话，不重试（避免重复），自然收个尾
-            yield "…呃，网络突然卡了一下，先这样吧。"
-        else:
-            # 一个字都没吐出来，等同于彻底失败，用兜底话术
-            yield random.choice(FALLBACK_REPLIES)
+            return
+
+        # 有些兼容 OpenAI 协议的服务会以“成功”状态结束请求，
+        # 但所有 delta.content 都为空。此前这里会让 GUI 静默结束。
+        last_error = RuntimeError("对话流正常结束但未返回文字")
+        logger.warning("对话流为空（第 %d 次尝试），准备重试", attempt + 1)
+
+    logger.error("重试后仍未获得回复，使用兜底话术。最后一次错误：%s", last_error)
+    yield random.choice(FALLBACK_REPLIES)
 
 
 def chat_with_ai(messages, context):
@@ -278,6 +356,9 @@ def generate_greeting(
     prompt = f"""
 你是{persona['name']}。
 
+性格：{persona['personality']}
+说话方式：{persona['speaking_style']}
+
 当前状态：
 
 心情：{context['emotion']['mood']}
@@ -294,37 +375,46 @@ def generate_greeting(
 
 要求：
 - 不超过30字
-- 符合秋山澪性格
+- 像真实女高中生在聊天软件里和熟人打招呼
 - 不要自我介绍
 - 像熟人见面
 - 每次尽量不同
+- 不写括号动作、小说旁白或景色描写
+- 不要虚构“刚练完新曲”“刚弹了贝斯”等开场事件
+- 不要为了体现身份主动提贝斯、练习或轻音部
+- 熟悉度不高时保持自然友好，不要表现得过分亲密
 关系：
 好感：{context['relationship']['affection']}
 信任：{context['relationship']['trust']}
 熟悉度：{context['relationship']['familiarity']}
 """
     try:
-        response = client.chat.completions.create(
+        response = client.chat.completions.create(**_daily_chat_request_options(
+            context,
             model=context['config']['model'],
             messages=[
                 {
                     "role": "system",
                     "content": prompt
                 }
-            ]
-        )
-        return response.choices[0].message.content
+            ],
+            max_tokens=40,
+        ))
+        return _normalize_short_character_line(
+            response.choices[0].message.content,
+            max_chars=38,
+        ) or "嗯…你来了。"
     except Exception as e:
         logger.warning("生成开场白失败，使用默认开场白：%s", e)
         return "嗯…你来了。"
 
 
 # 主动消息彻底失败时的兜底话术
-PROACTIVE_FALLBACK_REPLIES = [
-    "在干嘛呢…突然有点想找你说话。",
-    "嗯…有点想你了。",
-    "你那边还好吗？"
-]
+PROACTIVE_FALLBACK_REPLIES = (
+    "现在有空吗？没什么……就是想和你说句话。",
+    "今天还顺利吗？别太勉强自己。",
+    "你在忙吗？有空的话，陪我聊一会儿吧。",
+)
 
 
 def generate_proactive_message(context, reason_hint):
@@ -349,9 +439,12 @@ def generate_proactive_message(context, reason_hint):
 {reason_hint}
 
 要求：
-- 只说一句话，自然、符合你的人设和当前状态
+- 只说一句自然口语，最好在15~45个汉字内
 - 不要解释自己为什么突然说话
 - 不要说"我注意到""系统提示"等任何暴露后台机制的话
+- 不写括号动作、小说旁白或景色描写
+- 话题与音乐无关时，不提贝斯、琴弦、低音或练习
+- 不要把关系说得过分亲密；熟悉度不高时避免直接说“想你了”
 """
 
     client = create_ai_client(
@@ -360,13 +453,18 @@ def generate_proactive_message(context, reason_hint):
     )
 
     try:
-        response = client.chat.completions.create(
+        response = client.chat.completions.create(**_daily_chat_request_options(
+            context,
             model=context["config"]["model"],
             messages=[
                 {"role": "system", "content": system_prompt + special_instruction}
-            ]
-        )
-        return response.choices[0].message.content
+            ],
+            max_tokens=48,
+        ))
+        return _normalize_short_character_line(
+            response.choices[0].message.content,
+            max_chars=48,
+        ) or random.choice(PROACTIVE_FALLBACK_REPLIES)
     except Exception as e:
         logger.warning("生成主动消息失败，使用兜底话术：%s", e)
         return random.choice(PROACTIVE_FALLBACK_REPLIES)

@@ -20,6 +20,7 @@ import threading
 import time
 
 from intent_manager import detect_intent
+from ai.fallbacks import is_transient_fallback
 from profile_extractor import extract_profile_info
 from router import handle_intent
 from ai.chat import chat_with_ai_stream
@@ -184,7 +185,10 @@ class ConversationOrchestrator:
             # 生成回复时不持有全局状态锁，否则一次流式 AI 请求会把
             # InitiativeEngine 整个阻塞住。在锁内取不可变快照，锁外只读快照，
             # 也避免后台主动消息在流式生成期间改动正在使用的列表。
-            conversation_snapshot = copy.deepcopy(self.conversation_history)
+            history_limit = self.config.get("chat_history_max_messages", 8)
+            conversation_snapshot = copy.deepcopy(
+                self.conversation_history[-history_limit:]
+            )
             context_snapshot = copy.deepcopy(self.context.get_context())
 
         # 精确查表类回复（询问喜好/昵称/情绪状态等），优先查表，查不到再退回 AI
@@ -253,10 +257,13 @@ class ConversationOrchestrator:
         clean_message = prepared["clean_message"]
 
         reply = router_reply if router_reply else (clean_reply(raw_reply) if raw_reply else "")
+        transient_fallback = is_transient_fallback(reply)
 
         with self.lock:
-            # 记录助手消息
-            self.conversation_history.append({"role": "assistant", "content": reply})
+            # 短暂故障兜底只展示给用户，不写入角色历史；否则模型会把它
+            # 当成 Mio 的正常说话示例，在网络恢复后继续模仿。
+            if not transient_fallback:
+                self.conversation_history.append({"role": "assistant", "content": reply})
             self.conversation_history, overflow = save_memory(self.conversation_history)
             self._pending_overflow.extend(overflow)
             overflow_to_queue = list(self._pending_overflow)
@@ -265,7 +272,7 @@ class ConversationOrchestrator:
         if overflow_to_queue:
             queue_summary_messages(overflow_to_queue)
 
-        if self._postprocess_accepting:
+        if self._postprocess_accepting and not transient_fallback:
             self._postprocess_queue.put({
                 "clean_message": clean_message,
                 "reply": reply,
@@ -273,9 +280,10 @@ class ConversationOrchestrator:
             })
 
         logger.info(
-            "[PERF] finalize_turn fast_commit duration=%.4fs queued_postprocess=%s",
+            "[PERF] finalize_turn fast_commit duration=%.4fs queued_postprocess=%s transient_fallback=%s",
             time.perf_counter() - started_at,
-            self._postprocess_accepting,
+            self._postprocess_accepting and not transient_fallback,
+            transient_fallback,
         )
 
         return reply
