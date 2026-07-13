@@ -83,6 +83,9 @@ class CharacterController:
         motion_map=None,
         parameter_map=None,
         expression_intensity=1.0,
+        waiting_motion_intensity=1.0,
+        waiting_gaze_intensity=1.0,
+        waiting_motion_speed=1.4,
         available_expressions=None,
         available_motion_groups=None,
         available_parameters=None,
@@ -93,6 +96,15 @@ class CharacterController:
         self.motion_map = motion_map or {}
         self.parameter_map = parameter_map or {}
         self.expression_intensity = max(0.0, float(expression_intensity))
+        self.waiting_motion_intensity = max(
+            0.0, min(2.0, float(waiting_motion_intensity))
+        )
+        self.waiting_gaze_intensity = max(
+            0.0, min(2.0, float(waiting_gaze_intensity))
+        )
+        self.waiting_motion_speed = max(
+            0.5, min(2.0, float(waiting_motion_speed))
+        )
         self.available_expressions = set(available_expressions or [])
         self.available_motion_groups = set(available_motion_groups or [])
         self.available_parameters = set(available_parameters or [])
@@ -115,6 +127,12 @@ class CharacterController:
         self._speech_mouth_target = 0.0
         self._mouth_open = 0.0
         self._reply_input_finished = True
+        self._audio_mouth_active = False
+        self._audio_mouth_target = 0.0
+        self.is_preparing_speech = False
+        self._waiting_motion_preview = False
+        self._preparing_blend = 0.0
+        self._waiting_motion_phase = 0.0
 
         self._blink_started_at = None
         self._next_blink_at = now + self._rng.uniform(2.5, 5.5)
@@ -149,6 +167,8 @@ class CharacterController:
             self._apply_parameters(self._last_emotion)
 
     def on_reply_started(self):
+        self._audio_mouth_active = False
+        self._audio_mouth_target = 0.0
         self.is_speaking = True
         self._reply_input_finished = False
         now = time.monotonic()
@@ -193,6 +213,92 @@ class CharacterController:
             self.is_speaking = False
             self._speech_mouth_target = 0.0
 
+    def on_audio_started(self):
+        """真实语音开始播放；音频响度暂时接管文字节奏嘴型。"""
+        self.is_preparing_speech = False
+        self._audio_mouth_active = True
+        self._audio_mouth_target = 0.0
+        self.is_speaking = True
+        self._speech_segments.clear()
+        self._speech_segment_remaining = 0.0
+        self._speech_mouth_target = 0.0
+        now = time.monotonic()
+        self._speaking_started_at = now
+        self._gaze_target_x = self._rng.uniform(-0.08, 0.08)
+        self._gaze_target_y = self._rng.uniform(-0.03, 0.08)
+
+    def on_audio_amplitude(self, value):
+        """更新当前音频窗口的归一化响度。"""
+        if not self._audio_mouth_active:
+            return
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 0.0
+        self._audio_mouth_target = max(0.0, min(1.0, value))
+
+    def on_audio_finished(self):
+        """所有排队语音播放完毕，让嘴型自然平滑闭合。"""
+        self._audio_mouth_active = False
+        self._audio_mouth_target = 0.0
+        self.is_speaking = False
+
+    def on_speech_preparing(self):
+        """完整文字已生成、TTS 正在准备时进入有生命感的安静待机。"""
+        self.is_preparing_speech = True
+        self._audio_mouth_active = False
+        self._audio_mouth_target = 0.0
+        self.is_speaking = False
+        self._speech_segments.clear()
+        self._speech_segment_remaining = 0.0
+        self._speech_mouth_target = 0.0
+        now = time.monotonic()
+        # 尽快选取第一个思考视线目标，但仍由帧平滑器逐渐移动过去。
+        self._next_gaze_at = min(self._next_gaze_at, now + 0.18)
+
+    def on_speech_preparing_finished(self):
+        """TTS 失败或没有可播放内容时退出等待动作。"""
+        self.is_preparing_speech = False
+
+    def set_waiting_motion_intensity(self, value):
+        """实时调整等待语音时的头部与物理头发动作强度。"""
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return self.waiting_motion_intensity
+        self.waiting_motion_intensity = max(0.0, min(2.0, value))
+        return self.waiting_motion_intensity
+
+    def set_waiting_motion_preview(self, enabled):
+        """调参窗口使用的待机动作预览，不改变真实 TTS 状态。"""
+        self._waiting_motion_preview = bool(enabled)
+        if enabled:
+            now = time.monotonic()
+            self._next_gaze_at = min(self._next_gaze_at, now + 0.18)
+
+    def set_waiting_gaze_intensity(self, value):
+        """实时调整等待语音时的视线游移幅度。"""
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return self.waiting_gaze_intensity
+        self.waiting_gaze_intensity = max(0.0, min(2.0, value))
+        now = time.monotonic()
+        self._next_gaze_at = now
+        if self.waiting_gaze_intensity == 0.0:
+            self._gaze_target_x = 0.0
+            self._gaze_target_y = 0.0
+        return self.waiting_gaze_intensity
+
+    def set_waiting_motion_speed(self, value):
+        """实时调整待机头部、身体、眉毛和视线切换速度。"""
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return self.waiting_motion_speed
+        self.waiting_motion_speed = max(0.5, min(2.0, value))
+        return self.waiting_motion_speed
+
     def preview_parameters(self, mood, parameters):
         """实时预览一组未缩放的情绪参数，供调试滑块使用。"""
         preview = {}
@@ -230,6 +336,17 @@ class CharacterController:
         self._speaking_blend = self._smooth_value(
             self._speaking_blend, speaking_target, 7.0, dt
         )
+        waiting_motion_active = (
+            self.is_preparing_speech or self._waiting_motion_preview
+        )
+        preparing_target = 1.0 if waiting_motion_active else 0.0
+        preparing_speed = 2.1 if preparing_target > self._preparing_blend else 2.6
+        self._preparing_blend = self._smooth_value(
+            self._preparing_blend, preparing_target, preparing_speed, dt
+        )
+        # 独立累积相位，拖动速度滑块时只改变后续推进速度，不会因使用
+        # monotonic 绝对时间乘倍率而突然跳到另一个动作相位。
+        self._waiting_motion_phase += dt * self.waiting_motion_speed
 
         desired = self._build_desired_parameters(now, dt)
         rest_mouth_open = self._clamp_parameter(
@@ -253,7 +370,11 @@ class CharacterController:
         if output:
             self._call_widget("set_parameters", output)
 
-        speech_mouth = self._advance_speech_mouth(dt, now)
+        speech_mouth = (
+            self._audio_mouth_target
+            if self._audio_mouth_active
+            else self._advance_speech_mouth(dt, now)
+        )
         # 静态开合决定嘴唇的休息形状；说话嘴型在剩余空间内叠加，既不会
         # 突然跳回闭嘴，也不会超过模型的 0～1 范围。
         mouth_target = rest_mouth_open + speech_mouth * (1.0 - rest_mouth_open)
@@ -295,13 +416,56 @@ class CharacterController:
         )
         desired["ParamBodyAngleX"] += motion_blend * 0.25 * math.sin(now * 0.48)
 
+        # 等待 TTS 时采用低频、错相位的连续曲线。所有幅度先经过 preparing
+        # blend 缓慢淡入，避免状态切换时头部突跳；头部/身体的连续转动也会
+        # 自然带动模型物理系统中的头发，而不是直接抖动发丝参数。
+        # 调参窗口的静态参数先落地，待机动作再以相对偏移叠加，确保拖动
+        # “待机摆头强度”时能实时看到头部和物理头发运动。
+        desired.update(self._manual_parameters)
+
+        if self._waiting_motion_preview:
+            # 调参窗口中仍保留静态视线值作为中心点，再叠加待机游移，
+            # 这样拖动视线强度滑块时能立即看到真实效果。
+            desired["ParamEyeBallX"] = self._clamp_parameter(
+                "ParamEyeBallX",
+                self._manual_parameters.get("ParamEyeBallX", 0.0) + self._gaze_x,
+            )
+            desired["ParamEyeBallY"] = self._clamp_parameter(
+                "ParamEyeBallY",
+                self._manual_parameters.get("ParamEyeBallY", 0.0) + self._gaze_y,
+            )
+
+        preparing = (
+            motion_blend
+            * self._preparing_blend
+            * self.waiting_motion_intensity
+        )
+        waiting_time = self._waiting_motion_phase
+        desired["ParamAngleX"] += preparing * (
+            7.2 * math.sin(waiting_time * 0.46)
+            + 1.35 * math.sin(waiting_time * 0.21 + 1.1)
+            + 0.62 * math.sin(waiting_time * 0.82 + 0.45)
+        )
+        desired["ParamAngleY"] += preparing * 1.65 * math.sin(waiting_time * 0.34 + 0.7)
+        desired["ParamAngleZ"] += preparing * (
+            2.35 * math.sin(waiting_time * 0.31 + 2.0)
+            + 0.48 * math.sin(waiting_time * 0.68 + 0.2)
+        )
+        desired["ParamBodyAngleX"] += preparing * 1.55 * math.sin(waiting_time * 0.31 + 1.6)
+        desired["ParamBodyAngleY"] += preparing * 0.48 * math.sin(waiting_time * 0.23 + 0.4)
+        desired["ParamBrowLY"] += preparing * (
+            0.045 * math.sin(waiting_time * 0.72)
+            + 0.018 * math.sin(waiting_time * 0.29)
+        )
+        desired["ParamBrowRY"] += preparing * (
+            0.042 * math.sin(waiting_time * 0.72 + 0.35)
+            + 0.016 * math.sin(waiting_time * 0.31)
+        )
+
         if now < self._emphasis_until:
             self._apply_emphasis(desired)
         else:
             self._emphasis_kind = None
-
-        # 滑块预览最后覆盖程序动作，确保用户看到的就是正在调的准确数值。
-        desired.update(self._manual_parameters)
 
         return desired
 
@@ -328,7 +492,12 @@ class CharacterController:
 
     def _update_gaze(self, now, dt):
         if now >= self._next_gaze_at:
-            if self.is_speaking:
+            if self.is_preparing_speech or self._waiting_motion_preview:
+                gaze_scale = self.waiting_gaze_intensity
+                self._gaze_target_x = self._rng.uniform(-0.42, 0.42) * gaze_scale
+                self._gaze_target_y = self._rng.uniform(-0.18, 0.22) * gaze_scale
+                delay = self._rng.uniform(1.2, 2.6) / self.waiting_motion_speed
+            elif self.is_speaking:
                 self._gaze_target_x = self._rng.uniform(-0.18, 0.18)
                 self._gaze_target_y = self._rng.uniform(-0.08, 0.12)
                 delay = self._rng.uniform(1.5, 3.0)
@@ -338,8 +507,17 @@ class CharacterController:
                 delay = self._rng.uniform(2.0, 4.5)
             self._next_gaze_at = now + delay
 
-        self._gaze_x = self._smooth_value(self._gaze_x, self._gaze_target_x, 3.0, dt)
-        self._gaze_y = self._smooth_value(self._gaze_y, self._gaze_target_y, 3.0, dt)
+        gaze_speed = (
+            1.8 * math.sqrt(self.waiting_motion_speed)
+            if self.is_preparing_speech or self._waiting_motion_preview
+            else 3.0
+        )
+        self._gaze_x = self._smooth_value(
+            self._gaze_x, self._gaze_target_x, gaze_speed, dt
+        )
+        self._gaze_y = self._smooth_value(
+            self._gaze_y, self._gaze_target_y, gaze_speed, dt
+        )
 
     def _apply_emphasis(self, desired):
         if self._emphasis_kind == "excited":

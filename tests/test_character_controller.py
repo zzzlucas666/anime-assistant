@@ -206,6 +206,129 @@ class CharacterControllerTests(unittest.TestCase):
 
         self.assertGreater(max(self.widget.mouth_updates[-5:]), resting)
 
+    def test_audio_amplitude_overrides_text_rhythm_until_playback_finishes(self):
+        controller = self.make_controller()
+        controller.on_reply_started()
+        controller.on_reply_chunk("这段文字不应继续控制嘴型")
+        controller.on_audio_started()
+        controller.on_audio_amplitude(0.8)
+
+        self.tick(controller, count=4)
+
+        self.assertTrue(controller.is_speaking)
+        self.assertGreater(self.widget.mouth_updates[-1], 0.5)
+
+        controller.on_audio_finished()
+        self.tick(controller, count=12)
+        self.assertFalse(controller.is_speaking)
+        self.assertLess(self.widget.mouth_updates[-1], 0.05)
+
+    def test_speech_preparing_adds_smooth_idle_gaze_head_and_brow_motion(self):
+        controller = self.make_controller()
+        controller.on_speech_preparing()
+
+        self.tick(controller, count=90)
+
+        angle_x = [update["ParamAngleX"] for update in self.widget.parameter_updates]
+        angle_z = [update["ParamAngleZ"] for update in self.widget.parameter_updates]
+        brow_y = [update["ParamBrowLY"] for update in self.widget.parameter_updates]
+        gaze_x = [update["ParamEyeBallX"] for update in self.widget.parameter_updates]
+        consecutive_head_steps = [
+            abs(current - previous)
+            for previous, current in zip(angle_x, angle_x[1:])
+        ]
+
+        self.assertTrue(controller.is_preparing_speech)
+        self.assertFalse(controller.is_speaking)
+        self.assertGreater(max(angle_x) - min(angle_x), 1.4)
+        self.assertGreater(max(angle_z) - min(angle_z), 0.28)
+        self.assertGreater(max(brow_y) - min(brow_y), 0.005)
+        self.assertGreater(max(gaze_x) - min(gaze_x), 0.05)
+        self.assertLess(max(consecutive_head_steps), 0.7)
+        self.assertLess(max(self.widget.mouth_updates), 0.01)
+
+    def test_audio_start_replaces_speech_preparing_state(self):
+        controller = self.make_controller()
+        controller.on_speech_preparing()
+
+        controller.on_audio_started()
+
+        self.assertFalse(controller.is_preparing_speech)
+        self.assertTrue(controller.is_speaking)
+
+    def test_waiting_motion_intensity_scales_and_clamps_motion(self):
+        controller = self.make_controller()
+        controller.is_preparing_speech = True
+        controller._preparing_blend = 1.0
+        controller._created_at = 0.0
+        now = self.clock.value
+
+        controller.set_waiting_motion_intensity(0.0)
+        no_waiting_motion = controller._build_desired_parameters(now, 0.033)[
+            "ParamAngleX"
+        ]
+        controller.set_waiting_motion_intensity(2.0)
+        strong_waiting_motion = controller._build_desired_parameters(now, 0.033)[
+            "ParamAngleX"
+        ]
+
+        self.assertGreater(abs(strong_waiting_motion - no_waiting_motion), 1.0)
+        self.assertEqual(controller.set_waiting_motion_intensity(99), 2.0)
+        self.assertEqual(controller.set_waiting_motion_intensity(-5), 0.0)
+
+    def test_waiting_motion_preview_does_not_fake_tts_state(self):
+        controller = self.make_controller()
+
+        controller.set_waiting_motion_preview(True)
+        self.tick(controller, count=10)
+
+        self.assertFalse(controller.is_preparing_speech)
+        self.assertGreater(controller._preparing_blend, 0.0)
+
+        controller.set_waiting_motion_preview(False)
+        self.tick(controller, count=20)
+        self.assertLess(controller._preparing_blend, 0.2)
+
+    def test_waiting_gaze_intensity_scales_and_clamps_targets(self):
+        class MaximumRng:
+            @staticmethod
+            def uniform(_lower, upper):
+                return upper
+
+        controller = self.make_controller()
+        controller._rng = MaximumRng()
+        controller.set_waiting_motion_preview(True)
+
+        controller.set_waiting_gaze_intensity(0.5)
+        controller._update_gaze(self.clock.value, 0.033)
+        low_target = controller._gaze_target_x
+
+        controller.set_waiting_gaze_intensity(2.0)
+        controller._update_gaze(self.clock.value, 0.033)
+        high_target = controller._gaze_target_x
+
+        self.assertAlmostEqual(low_target, 0.21)
+        self.assertAlmostEqual(high_target, 0.84)
+        self.assertEqual(controller.set_waiting_gaze_intensity(99), 2.0)
+        self.assertEqual(controller.set_waiting_gaze_intensity(-5), 0.0)
+        self.assertEqual(controller._gaze_target_x, 0.0)
+
+    def test_waiting_motion_speed_changes_phase_rate_without_phase_jump(self):
+        controller = self.make_controller()
+        controller.set_waiting_motion_preview(True)
+        self.tick(controller, seconds=0.04)
+        controller._waiting_motion_phase = 3.0
+
+        applied = controller.set_waiting_motion_speed(2.0)
+        phase_before_tick = controller._waiting_motion_phase
+        self.tick(controller, seconds=0.04)
+
+        self.assertEqual(applied, 2.0)
+        self.assertEqual(phase_before_tick, 3.0)
+        self.assertAlmostEqual(controller._waiting_motion_phase, 3.08)
+        self.assertEqual(controller.set_waiting_motion_speed(99), 2.0)
+        self.assertEqual(controller.set_waiting_motion_speed(0), 0.5)
+
     def test_unknown_model_parameters_are_filtered(self):
         controller = self.make_controller(
             parameter_map={"happy": {"ParamCheek": 1.0, "NotInModel": 1.0}},

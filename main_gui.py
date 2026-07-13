@@ -39,16 +39,26 @@ import sys
 import html
 import threading
 import datetime
+from collections import deque
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
+from PySide6.QtCore import (
+    Qt, QThread, Signal, QObject, QTimer, QBuffer, QByteArray, QIODevice, QUrl,
+)
 from PySide6.QtGui import QFont, QTextCursor, QKeyEvent, QSurfaceFormat
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QLineEdit, QPushButton, QLabel
 )
 
 from context_manager import ContextManager
-from config_loader import load_config, save_live2d_parameter_preset
+from config_loader import (
+    load_config,
+    save_live2d_parameter_preset,
+    save_live2d_waiting_gaze_intensity,
+    save_live2d_waiting_motion_intensity,
+    save_live2d_waiting_motion_speed,
+)
 from ai.chat import generate_greeting
 from memory_manager import load_memory
 from emotion_manager import load_emotion
@@ -61,6 +71,7 @@ from character_controller import CharacterController
 from live2d_model_utils import load_live2d_model_metadata, resolve_live2d_model_path
 from live2d_parameter_tuner import Live2DParameterTuner
 from semantic_memory import warmup_model_async
+from tts_service import SpeechAudio, SpeechSynthesisService
 
 logger = get_logger(__name__)
 
@@ -229,6 +240,99 @@ class ProactiveBridge(QObject):
     """
     message_received = Signal(str)
     state_updated = Signal()
+
+
+class SpeechBridge(QObject):
+    """把 TTS 后台线程生成的音频安全送回 Qt 主线程。"""
+
+    audio_ready = Signal(object)
+    error_occurred = Signal(str)
+
+
+class SpeechPlaybackController(QObject):
+    """在内存中顺序播放 WAV，并把实时响度送给角色控制器。"""
+
+    def __init__(self, character_controller, parent=None):
+        super().__init__(parent)
+        self.character_controller = character_controller
+        self.audio_output = QAudioOutput(self)
+        self.player = QMediaPlayer(self)
+        self.player.setAudioOutput(self.audio_output)
+        self.audio_output.setVolume(1.0)
+        self.player.positionChanged.connect(self._on_position_changed)
+        self.player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self.player.errorOccurred.connect(self._on_player_error)
+        self._queue = deque()
+        self._current = None
+        self._buffer = None
+        self._transition_pending = False
+
+    def enqueue(self, audio):
+        if not isinstance(audio, SpeechAudio) or not audio.wav_data:
+            return
+        self._queue.append(audio)
+        if self._current is None:
+            self._play_next()
+
+    def stop(self):
+        self._queue.clear()
+        self._transition_pending = False
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self._release_current()
+        self.character_controller.on_audio_finished()
+
+    def _play_next(self):
+        self._transition_pending = False
+        if self._buffer is not None:
+            # 先让后端脱离旧设备，再于事件循环安全点释放 QBuffer。
+            self.player.setSource(QUrl())
+        self._release_current()
+        if not self._queue:
+            self.character_controller.on_audio_finished()
+            return
+
+        self._current = self._queue.popleft()
+        self._buffer = QBuffer(self)
+        self._buffer.setData(QByteArray(self._current.wav_data))
+        self._buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        self.character_controller.on_audio_started()
+        self.player.setSourceDevice(self._buffer, QUrl())
+        self.player.play()
+
+    def _on_position_changed(self, position_ms):
+        if self._current is None or not self._current.mouth_envelope:
+            return
+        index = int(position_ms // self._current.envelope_window_ms)
+        index = max(0, min(index, len(self._current.mouth_envelope) - 1))
+        self.character_controller.on_audio_amplitude(
+            self._current.mouth_envelope[index]
+        )
+
+    def _on_media_status_changed(self, status):
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._schedule_play_next()
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            logger.warning("Qt 无法播放 AivisSpeech 返回的音频，已跳过当前句")
+            self._schedule_play_next()
+
+    def _schedule_play_next(self):
+        """退出 QtMultimedia 状态回调后再切源，避免 FFmpeg 回调重入。"""
+        if self._transition_pending:
+            return
+        self._transition_pending = True
+        QTimer.singleShot(0, self._play_next)
+
+    def _on_player_error(self, _error, error_string):
+        if error_string:
+            logger.warning("TTS 音频播放失败：%s", error_string)
+
+    def _release_current(self):
+        self._current = None
+        if self._buffer is not None:
+            self._buffer.close()
+            self._buffer.deleteLater()
+            self._buffer = None
 
 
 if LIVE2D_AVAILABLE:
@@ -437,12 +541,35 @@ class MainWindow(QMainWindow):
                 "live2d_expression_intensity",
                 DEFAULT_LIVE2D_EXPRESSION_INTENSITY,
             ),
+            waiting_motion_intensity=self.config.get(
+                "live2d_waiting_motion_intensity", 1.0
+            ),
+            waiting_gaze_intensity=self.config.get(
+                "live2d_waiting_gaze_intensity", 1.0
+            ),
+            waiting_motion_speed=self.config.get(
+                "live2d_waiting_motion_speed", 1.4
+            ),
             available_expressions=self.live2d_metadata.get("expressions", []),
             available_motion_groups=self.live2d_metadata.get("motion_groups", []),
             available_parameters=self.live2d_metadata.get("parameters", []),
         )
         if self.live2d_widget is not None:
             self.live2d_widget.set_character_controller(self.character_controller)
+        self.tts_enabled = bool(self.config.get("tts_enabled", False))
+        self.speech_bridge = SpeechBridge(self)
+        self.speech_bridge.audio_ready.connect(self._on_speech_audio_ready)
+        self.speech_bridge.error_occurred.connect(self._on_speech_error)
+        self.speech_playback = SpeechPlaybackController(
+            self.character_controller, self
+        )
+        self.speech_service = None
+        if self.tts_enabled:
+            self.speech_service = SpeechSynthesisService(
+                self.config,
+                on_audio_ready=self.speech_bridge.audio_ready.emit,
+                on_error=self.speech_bridge.error_occurred.emit,
+            )
         self._start_timers()
         self._start_background_thread()
         self._show_greeting()
@@ -594,6 +721,12 @@ class MainWindow(QMainWindow):
             recommended_map=DEFAULT_LIVE2D_PARAMETER_MAP,
             current_mood=self.emotion.get("mood", "neutral"),
             save_callback=self._save_expression_preset,
+            waiting_motion_intensity=self.character_controller.waiting_motion_intensity,
+            save_waiting_motion_callback=self._save_waiting_motion_intensity,
+            waiting_gaze_intensity=self.character_controller.waiting_gaze_intensity,
+            save_waiting_gaze_callback=self._save_waiting_gaze_intensity,
+            waiting_motion_speed=self.character_controller.waiting_motion_speed,
+            save_waiting_motion_speed_callback=self._save_waiting_motion_speed,
             parent=self,
         )
         dialog.exec()
@@ -602,6 +735,24 @@ class MainWindow(QMainWindow):
         saved = save_live2d_parameter_preset(self.config, mood, parameters)
         if not saved:
             logger.error("保存 Live2D 情绪参数失败：mood=%s", mood)
+        return saved
+
+    def _save_waiting_motion_intensity(self, intensity):
+        saved = save_live2d_waiting_motion_intensity(self.config, intensity)
+        if not saved:
+            logger.error("保存 Live2D 待机动作强度失败：%s", intensity)
+        return saved
+
+    def _save_waiting_gaze_intensity(self, intensity):
+        saved = save_live2d_waiting_gaze_intensity(self.config, intensity)
+        if not saved:
+            logger.error("保存 Live2D 待机视线强度失败：%s", intensity)
+        return saved
+
+    def _save_waiting_motion_speed(self, speed):
+        saved = save_live2d_waiting_motion_speed(self.config, speed)
+        if not saved:
+            logger.error("保存 Live2D 待机动作速度失败：%s", speed)
         return saved
 
     def _update_status_bar(self):
@@ -703,6 +854,7 @@ class MainWindow(QMainWindow):
         self.messages.append(self._new_message("system", f"{self.config.get('assistant_name', 'Mio')} 已启动"))
         self.messages.append(self._new_message("mio", greeting))
         self._render()
+        self._speak_reply(greeting)
 
     # ------------------------------------------------------------------
     # 发送消息 / 接收流式回复
@@ -744,22 +896,28 @@ class MainWindow(QMainWindow):
             self.is_streaming = True
             self.streaming_buffer = ""
             self.streaming_start_time = datetime.datetime.now().strftime("%H:%M")
-            self.character_controller.on_reply_started()
+            if not self.tts_enabled:
+                self.character_controller.on_reply_started()
 
         self.streaming_buffer += chunk
-        self.character_controller.on_reply_chunk(chunk)
+        if not self.tts_enabled:
+            self.character_controller.on_reply_chunk(chunk)
         self._schedule_stream_render()
 
     def _on_turn_finished(self):
         self._flush_stream_render()
         # 把流式过程中的临时气泡固化成正式的一条消息
-        if self.streaming_buffer:
-            self.messages.append(self._new_message("mio", self.streaming_buffer))
+        reply_text = self.streaming_buffer
+        if reply_text:
+            self.messages.append(self._new_message("mio", reply_text))
 
         self.is_streaming = False
         self.is_typing = False
         self.streaming_buffer = ""
-        self.character_controller.on_reply_finished()
+        if self.tts_enabled:
+            self._speak_reply(reply_text)
+        else:
+            self.character_controller.on_reply_finished()
 
         self._render()
         self._update_status_bar()
@@ -777,7 +935,8 @@ class MainWindow(QMainWindow):
         self.is_streaming = False
         self.is_typing = False
         self.streaming_buffer = ""
-        self.character_controller.on_reply_finished()
+        if not self.tts_enabled:
+            self.character_controller.on_reply_finished()
         self.messages.append(self._new_message("system", "（出了点问题，请稍后再试）"))
         self._render()
 
@@ -790,6 +949,28 @@ class MainWindow(QMainWindow):
         self.messages.append(self._new_message("mio", message))
         self._render()
         self._update_status_bar()
+        self._speak_reply(message)
+
+    # ------------------------------------------------------------------
+    # AivisSpeech 合成 / 播放
+    # ------------------------------------------------------------------
+
+    def _speak_reply(self, text):
+        if not self.tts_enabled or self.speech_service is None or not text:
+            return
+        mood = self.emotion.get("mood", "neutral")
+        if self.speech_service.speak(text, mood):
+            self.character_controller.on_speech_preparing()
+
+    def _on_speech_audio_ready(self, audio):
+        if self._is_closing:
+            return
+        self.speech_playback.enqueue(audio)
+
+    def _on_speech_error(self, error_text):
+        # TTS 是可选表现层：错误只进日志，不用系统气泡打断聊天。
+        self.character_controller.on_speech_preparing_finished()
+        logger.warning("语音暂不可用，已保留文字回复：%s", error_text)
 
     # ------------------------------------------------------------------
     # 定时器回调：光标闪烁 / 正在输入的省略号动画
@@ -855,6 +1036,10 @@ class MainWindow(QMainWindow):
         self.cursor_timer.stop()
         self.typing_timer.stop()
         self.stream_render_timer.stop()
+        if self.speech_service is not None:
+            self.speech_service.shutdown()
+        self.character_controller.on_speech_preparing_finished()
+        self.speech_playback.stop()
         if self.live2d_widget is not None and hasattr(self.live2d_widget, "_frame_timer"):
             self.live2d_widget._frame_timer.stop()
 
