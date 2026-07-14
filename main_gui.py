@@ -313,7 +313,7 @@ class SpeechPlaybackController(QObject):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self._schedule_play_next()
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
-            logger.warning("Qt 无法播放 AivisSpeech 返回的音频，已跳过当前句")
+            logger.warning("Qt 无法播放 TTS 返回的音频，已跳过当前句")
             self._schedule_play_next()
 
     def _schedule_play_next(self):
@@ -952,7 +952,7 @@ class MainWindow(QMainWindow):
         self._speak_reply(message)
 
     # ------------------------------------------------------------------
-    # AivisSpeech 合成 / 播放
+    # 本地 Mio / AivisSpeech 合成与播放
     # ------------------------------------------------------------------
 
     def _speak_reply(self, text):

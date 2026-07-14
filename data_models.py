@@ -280,12 +280,21 @@ def normalize_app_config(value, defaults):
 
     for key in (
         "api_key", "model", "assistant_name", "base_url", "live2d_model_path",
-        "aivis_endpoint",
+        "aivis_endpoint", "tts_backend", "mio_tts_python", "mio_tts_worker",
+        "mio_tts_repo", "mio_tts_model", "mio_tts_config",
+        "mio_tts_style_vectors", "mio_tts_output_dir", "mio_tts_device",
     ):
         result[key] = _clean_string(result.get(key), _clean_string(defaults.get(key)))
 
+    if result["tts_backend"] not in {"aivis", "mio_style_bert_vits2"}:
+        result["tts_backend"] = defaults.get("tts_backend", "aivis")
+
     result["tts_enabled"] = _boolean(
         result.get("tts_enabled"), defaults.get("tts_enabled", False)
+    )
+    result["tts_fallback_to_aivis"] = _boolean(
+        result.get("tts_fallback_to_aivis"),
+        defaults.get("tts_fallback_to_aivis", True),
     )
     result["chat_thinking_enabled"] = _boolean(
         result.get("chat_thinking_enabled"),
@@ -318,6 +327,36 @@ def normalize_app_config(value, defaults):
         defaults.get("aivis_max_chars_per_request", 56),
         20,
         120,
+    )
+    result["mio_tts_startup_timeout_seconds"] = _number(
+        result.get("mio_tts_startup_timeout_seconds"),
+        defaults.get("mio_tts_startup_timeout_seconds", 45.0),
+        5.0,
+        180.0,
+    )
+    result["mio_tts_timeout_seconds"] = _number(
+        result.get("mio_tts_timeout_seconds"),
+        defaults.get("mio_tts_timeout_seconds", 120.0),
+        5.0,
+        300.0,
+    )
+    result["mio_tts_sdp_ratio"] = _number(
+        result.get("mio_tts_sdp_ratio"),
+        defaults.get("mio_tts_sdp_ratio", 0.35),
+        0.0,
+        1.0,
+    )
+    result["mio_tts_noise"] = _number(
+        result.get("mio_tts_noise"), defaults.get("mio_tts_noise", 0.5), 0.0, 2.0
+    )
+    result["mio_tts_noise_w"] = _number(
+        result.get("mio_tts_noise_w"), defaults.get("mio_tts_noise_w", 0.7), 0.0, 2.0
+    )
+    result["mio_tts_style_weight"] = _number(
+        result.get("mio_tts_style_weight"),
+        defaults.get("mio_tts_style_weight", 1.0),
+        0.0,
+        100.0,
     )
     default_speakers = defaults.get("aivis_mood_speakers", {})
     configured_speakers = result.get("aivis_mood_speakers")
