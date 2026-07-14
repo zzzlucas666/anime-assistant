@@ -10,7 +10,7 @@
 - 事件提取、中文语义检索和长期对话摘要。
 - 根据重要事件、情绪和空闲时间主动发起对话。
 - 可选 Live2D 立绘、情绪参数映射和真实音频振幅嘴型。
-- 可选 AivisSpeech 日语语音；中文回复在后台转成自然日语后发声。
+- 可选 Mio 本地 Style-Bert-VITS2 / AivisSpeech 日语语音；中文回复在后台转成自然日语后发声。
 - JSON 原子保存、备份恢复和本地日志。
 
 语义模型会在启动后后台预热；预热完成前自动使用轻量词面检索，不阻塞聊天首字。事件提取和长期摘要在顺序后台队列中执行；摘要默认每累计 10 条溢出消息批量生成一次。
@@ -47,7 +47,7 @@ pip install -r requirements-all.txt
 
 1. 复制 `config/settings_example.json` 为 `config/settings.json`。
 2. 填写 `api_key`。
-3. 根据需要调整模型、主动聊天、Live2D 和 AivisSpeech 配置。
+3. 根据需要调整模型、主动聊天、Live2D 和语音后端配置。
 
 最小配置：
 
@@ -70,14 +70,18 @@ pip install -r requirements-all.txt
 | `live2d_waiting_motion_intensity` | 等待语音时摆头与物理头发动作倍率（0～2） | `1.0` |
 | `live2d_waiting_gaze_intensity` | 等待语音时视线游移幅度倍率（0～2） | `1.0` |
 | `live2d_waiting_motion_speed` | 待机头部、身体、眉毛和视线节奏倍率 | `1.4` |
-| `tts_enabled` | 启用 AivisSpeech 语音 | `true` |
+| `tts_enabled` | 启用语音 | `true` |
+| `tts_backend` | 语音后端：`aivis` 或 `mio_style_bert_vits2` | `aivis` |
+| `tts_fallback_to_aivis` | Mio 本地模型失败时是否整条回退 AivisSpeech | `true` |
 | `tts_translate_to_japanese` | 中文回复是否另行翻译为日语发声 | `true` |
-| `tts_speed_scale` | AivisSpeech 语速倍率 | `1.0` |
-| `tts_volume_scale` | AivisSpeech 音量倍率 | `1.0` |
+| `tts_speed_scale` | 语速倍率 | `1.0` |
+| `tts_volume_scale` | 音量倍率 | `1.0` |
 | `aivis_endpoint` | 本地 AivisSpeech Engine 地址 | `http://127.0.0.1:10101` |
 | `aivis_timeout_seconds` | 单个语音片段的最长合成等待时间 | `60` |
 | `aivis_max_chars_per_request` | 单次合成的最大日语字符数 | `56` |
 | `aivis_mood_speakers` | 五种心情对应的 AivisSpeech Style ID | コハク的四种风格 |
+| `mio_tts_model` | Mio `.safetensors` 模型路径（相对项目根目录或绝对路径） | 第一版 2000 步模型路径 |
+| `mio_tts_python` | Style-Bert-VITS2 独立 Python 3.10 路径 | `data/training_tools/.../python.exe` |
 | `proactive_check_interval_minutes` | 主动聊天检查周期 | `5` |
 | `proactive_idle_threshold_minutes` | 空闲时间参考阈值 | `30` |
 | `proactive_min_interval_minutes` | 两次主动消息最小间隔 | `120` |
@@ -97,10 +101,22 @@ python main_gui.py
 
 如果未安装 Live2D 依赖、未配置模型，或模型路径无效，GUI 会自动退化为纯聊天界面。
 
-### AivisSpeech 日语语音
+### Mio 本地语音与 AivisSpeech
+
+将 `tts_backend` 设为 `mio_style_bert_vits2` 后，GUI 会在第一次需要语音时
+启动隐藏的 Python 3.10 后台进程，并把 Mio 模型常驻内存；主程序仍可使用
+Python 3.14 和 Live2D，不需要在同一环境安装两套互相冲突的依赖。模型和
+训练环境位于被 Git 忽略的 `data/` 目录，因此换电脑后需要单独复制或重新
+准备这些本地文件。窗口关闭时后台语音进程会一并退出。
+
+当前 Mio 模型只有 `Neutral` 风格；界面心情仍会驱动 Live2D 表情，但语音
+情绪暂时共用同一个风格向量。后续补充分类数据后可以再加入多风格切换。
+
+当 `tts_fallback_to_aivis` 为 `true` 时，本地模型缺失、启动失败或合成超时
+会让整条回复重新交给 AivisSpeech，不会混播两种音色或只播放前半句。
 
 先启动 AivisSpeech，并确认语音合成引擎监听 `127.0.0.1:10101`，再启动
-`main_gui.py`。文字回复不会等待语音：日语转换和语音合成都在后台完成；整条
+`main_gui.py`，即可使用 AivisSpeech 或作为 Mio 的降级后端。文字回复不会等待语音：日语转换和语音合成都在后台完成；整条
 回复的所有语音片段准备完毕后会在后台合并为一个完整 WAV，再一次性交给
 QtMultimedia 播放，不会只播放前半段，也避免分段切换音频源导致界面卡死。
 等待合成期间，Live2D 会进入安静的思考待机状态，以平滑视线、眉毛、头部和

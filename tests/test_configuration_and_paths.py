@@ -57,11 +57,17 @@ class ConfigurationAndPathTests(unittest.TestCase):
         self.assertEqual(loaded["live2d_waiting_motion_speed"], 1.4)
         self.assertEqual(loaded["proactive_max_per_day"], 7)
         self.assertTrue(loaded["tts_enabled"])
+        self.assertEqual(loaded["tts_backend"], "aivis")
+        self.assertTrue(loaded["tts_fallback_to_aivis"])
         self.assertTrue(loaded["tts_translate_to_japanese"])
         self.assertEqual(loaded["aivis_endpoint"], "http://127.0.0.1:10101")
         self.assertEqual(loaded["aivis_timeout_seconds"], 60.0)
         self.assertEqual(loaded["aivis_max_chars_per_request"], 56)
         self.assertEqual(loaded["aivis_mood_speakers"]["tired"], 1878365379)
+        self.assertEqual(
+            loaded["mio_tts_model"],
+            DEFAULT_CONFIG["mio_tts_model"],
+        )
 
     def test_live2d_parameter_preset_is_saved_without_losing_config(self):
         config = {

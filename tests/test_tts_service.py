@@ -155,6 +155,50 @@ class TTSServiceTests(unittest.TestCase):
             [("ready", "第一句。第二句。", 2)],
         )
 
+    def test_unavailable_primary_backend_falls_back_for_the_complete_reply(self):
+        class UnavailablePrimary:
+            endpoint = "local Mio model"
+            backend_name = "mio_style_bert_vits2"
+            last_error = "model unavailable"
+
+            def is_available(self):
+                return False
+
+        class FakeAivis:
+            endpoint = "fake Aivis"
+
+            def __init__(self):
+                self.calls = []
+
+            def is_available(self):
+                return True
+
+            def synthesize(self, text, *_args):
+                self.calls.append(text)
+                return make_test_wav(duration=0.1)
+
+        fallback = FakeAivis()
+        ready = []
+        errors = []
+        service = SpeechSynthesisService.__new__(SpeechSynthesisService)
+        service.config = {"aivis_max_chars_per_request": 56}
+        service.client = UnavailablePrimary()
+        service.fallback_client = fallback
+        service.translator = None
+        service.on_audio_ready = ready.append
+        service.on_error = errors.append
+        service._stop_event = threading.Event()
+        service._jobs = queue.Queue()
+        service._jobs.put(("第一句。第二句。", "neutral"))
+        service._jobs.put(None)
+
+        service._run()
+
+        self.assertEqual(fallback.calls, ["第一句。", "第二句。"])
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(ready[0].spoken_text, "第一句。第二句。")
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()
