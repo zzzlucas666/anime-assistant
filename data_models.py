@@ -11,7 +11,9 @@ import math
 ALLOWED_INTENTS = {"chat", "get_profile", "set_profile", "emotion_query"}
 ALLOWED_PROFILE_ACTIONS = {"add_like", "add_dislike", "set_name", "set_nickname", "none"}
 ALLOWED_MOODS = {"neutral", "happy", "shy", "sad", "tired"}
-ALLOWED_EVENT_EMOTIONS = {"neutral", "happy", "curious", "sad", "touched", "worried"}
+ALLOWED_EVENT_EMOTIONS = {"neutral", "happy", "shy", "curious", "sad", "touched", "worried"}
+ALLOWED_USER_EMOTIONS = {"neutral", "happy", "sad", "anxious", "angry", "embarrassed"}
+ALLOWED_EMOTION_MODIFIERS = {"none", "worried", "touched", "curious", "surprised", "annoyed"}
 ALLOWED_EVENT_IMPACTS = {"increase_bond", "increase_affinity", "none", "positive", "negative", "talk"}
 ALLOWED_MESSAGE_ROLES = {"user", "assistant"}
 
@@ -128,6 +130,7 @@ def normalize_event_extraction(value):
             "is_event": False,
             "event": "",
             "emotion": "neutral",
+            "user_emotion": "neutral",
             "impact": "none",
             "importance": 0.0,
         }
@@ -135,6 +138,9 @@ def normalize_event_extraction(value):
     emotion = _clean_string(value.get("emotion"), "neutral")
     if emotion not in ALLOWED_EVENT_EMOTIONS:
         emotion = "neutral"
+    user_emotion = _clean_string(value.get("user_emotion"), "neutral")
+    if user_emotion not in ALLOWED_USER_EMOTIONS:
+        user_emotion = "neutral"
     impact = _clean_string(value.get("impact"), "none")
     if impact not in ALLOWED_EVENT_IMPACTS:
         impact = "none"
@@ -143,6 +149,7 @@ def normalize_event_extraction(value):
         "is_event": True,
         "event": event_text,
         "emotion": emotion,
+        "user_emotion": user_emotion,
         "impact": impact,
         "importance": importance,
     }
@@ -173,11 +180,43 @@ def normalize_emotion(value):
     mood = _clean_string(value.get("mood"), "neutral")
     if mood not in ALLOWED_MOODS:
         mood = "neutral"
+    mood_strength_default = 0.0 if mood == "neutral" else (0.8 if mood == "tired" else 0.7)
+    modifier = _clean_string(value.get("modifier"), "none")
+    if modifier not in ALLOWED_EMOTION_MODIFIERS:
+        modifier = "none"
+    user_mood = _clean_string(value.get("user_mood"), "neutral")
+    if user_mood not in ALLOWED_USER_EMOTIONS:
+        user_mood = "neutral"
     return {
         "mood": mood,
         "energy": _number(value.get("energy"), 80, 0.0, 100.0),
         "last_updated": value.get("last_updated") if isinstance(value.get("last_updated"), str) else None,
         "mood_set_at": value.get("mood_set_at") if isinstance(value.get("mood_set_at"), str) else None,
+        "mood_strength": _number(value.get("mood_strength"), mood_strength_default, 0.0, 1.0),
+        "mood_turns_remaining": _integer(value.get("mood_turns_remaining"), 0, 0, 20),
+        "mood_source": _clean_string(value.get("mood_source"), "legacy"),
+        "modifier": modifier,
+        "modifier_strength": _number(value.get("modifier_strength"), 0.0, 0.0, 1.0),
+        "modifier_turns_remaining": _integer(value.get("modifier_turns_remaining"), 0, 0, 10),
+        "user_mood": user_mood,
+        "user_mood_strength": _number(value.get("user_mood_strength"), 0.0, 0.0, 1.0),
+        "user_mood_set_at": (
+            value.get("user_mood_set_at")
+            if isinstance(value.get("user_mood_set_at"), str)
+            else None
+        ),
+        "fatigue_strength": _number(value.get("fatigue_strength"), 0.0, 0.0, 1.0),
+        "pending_mood": (
+            value.get("pending_mood")
+            if value.get("pending_mood") in {"happy", "shy", "sad"}
+            else None
+        ),
+        "pending_mood_count": _integer(value.get("pending_mood_count"), 0, 0, 2),
+        "pending_mood_expires_at": (
+            value.get("pending_mood_expires_at")
+            if isinstance(value.get("pending_mood_expires_at"), str)
+            else None
+        ),
     }
 
 
@@ -251,6 +290,9 @@ def normalize_event_record(value):
     emotion = _clean_string(value.get("emotion"), "neutral")
     if emotion not in ALLOWED_EVENT_EMOTIONS:
         emotion = "neutral"
+    user_emotion = _clean_string(value.get("user_emotion"), "neutral")
+    if user_emotion not in ALLOWED_USER_EMOTIONS:
+        user_emotion = "neutral"
     impact = _clean_string(value.get("impact"), "none")
     if impact not in ALLOWED_EVENT_IMPACTS:
         impact = "none"
@@ -266,6 +308,7 @@ def normalize_event_record(value):
         "id": event_id,
         "event": event_text,
         "emotion": emotion,
+        "user_emotion": user_emotion,
         "impact": impact,
         "importance": _number(value.get("importance"), 0.3, 0.0, 1.0),
         "notified": _boolean(value.get("notified"), False),
@@ -283,10 +326,15 @@ def normalize_app_config(value, defaults):
         "aivis_endpoint", "tts_backend", "mio_tts_python", "mio_tts_worker",
         "mio_tts_repo", "mio_tts_model", "mio_tts_config",
         "mio_tts_style_vectors", "mio_tts_output_dir", "mio_tts_device",
+        "mio_gpt_sovits_python", "mio_gpt_sovits_worker",
+        "mio_gpt_sovits_repo", "mio_gpt_sovits_gpt_weights",
+        "mio_gpt_sovits_sovits_weights",
     ):
         result[key] = _clean_string(result.get(key), _clean_string(defaults.get(key)))
 
-    if result["tts_backend"] not in {"aivis", "mio_style_bert_vits2"}:
+    if result["tts_backend"] not in {
+        "aivis", "mio_style_bert_vits2", "mio_gpt_sovits_v2proplus"
+    }:
         result["tts_backend"] = defaults.get("tts_backend", "aivis")
 
     result["tts_enabled"] = _boolean(
@@ -358,6 +406,28 @@ def normalize_app_config(value, defaults):
         0.0,
         100.0,
     )
+    default_references = defaults.get("mio_gpt_sovits_references", {})
+    configured_references = result.get("mio_gpt_sovits_references")
+    if not isinstance(configured_references, dict):
+        configured_references = {}
+    result["mio_gpt_sovits_references"] = {
+        mood: {
+            "audio": _clean_string(
+                (configured_references.get(mood) or {}).get("audio")
+                if isinstance(configured_references.get(mood), dict)
+                else None,
+                reference.get("audio", ""),
+            ),
+            "prompt": _clean_string(
+                (configured_references.get(mood) or {}).get("prompt")
+                if isinstance(configured_references.get(mood), dict)
+                else None,
+                reference.get("prompt", ""),
+            ),
+        }
+        for mood, reference in default_references.items()
+        if isinstance(reference, dict)
+    }
     default_speakers = defaults.get("aivis_mood_speakers", {})
     configured_speakers = result.get("aivis_mood_speakers")
     if not isinstance(configured_speakers, dict):

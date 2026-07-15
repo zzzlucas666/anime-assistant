@@ -24,7 +24,13 @@ from ai.fallbacks import is_transient_fallback
 from profile_extractor import extract_profile_info
 from router import handle_intent
 from ai.chat import chat_with_ai_stream
-from emotion_manager import update_emotion, save_emotion
+from emotion_manager import (
+    has_interaction_signal,
+    infer_interaction_emotion,
+    plan_turn_emotion,
+    update_emotion,
+    save_emotion,
+)
 from event_manager import extract_event, save_event
 from relationship_manager import update_relationship, save_relationship
 from profile_manager import save_profile
@@ -140,6 +146,17 @@ class ConversationOrchestrator:
         with self.lock:
             intent_emotion_snapshot = copy.deepcopy(self.emotion)
             intent_profile_snapshot = copy.deepcopy(self.profile)
+            relationship_snapshot = copy.deepcopy(self.relationship)
+
+        # 回复生成前先规划“用户现在是什么感受、Mio 本轮该如何反应”。
+        # 这是纯本地判断，不增加网络等待；生成后的校准只允许细化该计划，
+        # 不会再让 Mio 因为自己上一句的语气而无限续期同一种情绪。
+        emotion_message = user_message.strip() if isinstance(user_message, str) else clean_message
+        turn_emotion = plan_turn_emotion(
+            emotion_message,
+            intent_emotion_snapshot,
+            relationship_snapshot,
+        )
 
         # detect_intent 和 extract_profile_info 互不依赖，并行执行省一次往返延迟。
         # 但普通聊天没必要每轮都做资料提取，先用关键词过滤，减少一部分前置AI调用。
@@ -190,6 +207,7 @@ class ConversationOrchestrator:
                 self.conversation_history[-history_limit:]
             )
             context_snapshot = copy.deepcopy(self.context.get_context())
+            context_snapshot["turn_emotion"] = copy.deepcopy(turn_emotion)
 
         # 精确查表类回复（询问喜好/昵称/情绪状态等），优先查表，查不到再退回 AI
         router_reply = None
@@ -198,11 +216,13 @@ class ConversationOrchestrator:
 
         prepared = {
             "clean_message": clean_message,
+            "emotion_message": emotion_message,
             "intent": intent,
             "confidence": confidence,
             "router_reply": router_reply,
             "conversation_snapshot": conversation_snapshot,
             "context_snapshot": context_snapshot,
+            "turn_emotion": turn_emotion,
         }
         logger.info(
             "[PERF] prepare_turn intent=%s profile_extract=%s duration=%.3fs",
@@ -259,6 +279,20 @@ class ConversationOrchestrator:
         reply = router_reply if router_reply else (clean_reply(raw_reply) if raw_reply else "")
         transient_fallback = is_transient_fallback(reply)
 
+        # 即时情绪不再等待“长期事件提取”。这一步只做本地轻量判断，
+        # 能让本轮状态、Live2D 和 TTS 在回复展示时就保持一致。
+        interaction_emotion = (
+            infer_interaction_emotion(
+                prepared.get("emotion_message", clean_message),
+                raw_reply or reply,
+                relationship=self.relationship,
+                planned=prepared.get("turn_emotion"),
+            )
+            if not router_reply and not transient_fallback
+            else {"mood": "neutral", "intensity": 0.0, "reason": "skipped"}
+        )
+        immediate_emotion_applied = has_interaction_signal(interaction_emotion)
+
         with self.lock:
             # 短暂故障兜底只展示给用户，不写入角色历史；否则模型会把它
             # 当成 Mio 的正常说话示例，在网络恢复后继续模仿。
@@ -269,14 +303,30 @@ class ConversationOrchestrator:
             overflow_to_queue = list(self._pending_overflow)
             self._pending_overflow.clear()
 
+            if immediate_emotion_applied:
+                self.emotion = update_emotion(
+                    self.emotion,
+                    interaction=interaction_emotion,
+                )
+                save_emotion(self.emotion)
+                self.context.update(self.emotion, self.profile, self.relationship)
+
         if overflow_to_queue:
             queue_summary_messages(overflow_to_queue)
+
+        if immediate_emotion_applied and self.on_state_updated:
+            try:
+                self.on_state_updated()
+            except Exception as e:
+                logger.warning("通知界面即时情绪更新失败：%s", e)
 
         if self._postprocess_accepting and not transient_fallback:
             self._postprocess_queue.put({
                 "clean_message": clean_message,
                 "reply": reply,
                 "router_reply": router_reply,
+                "interaction_emotion": interaction_emotion,
+                "immediate_emotion_applied": immediate_emotion_applied,
             })
 
         logger.info(
@@ -317,8 +367,11 @@ class ConversationOrchestrator:
             event_duration = time.perf_counter() - event_started_at
 
         with self.lock:
-            self.emotion = update_emotion(self.emotion, event)
-            save_emotion(self.emotion)
+            # 即时信号已在 finalize_turn 应用时，不再让稍后返回的长期事件
+            # 标签覆盖它，也避免同一轮重复消耗精力。
+            if not task.get("immediate_emotion_applied", False):
+                self.emotion = update_emotion(self.emotion, event)
+                save_emotion(self.emotion)
 
             if not router_reply:
                 save_event(event)

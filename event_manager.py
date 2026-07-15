@@ -151,7 +151,8 @@ def extract_event(api_key, model, user_message, ai_reply, base_url=None):
 {{
   "is_event": true 或 false,
   "event": "用1-2句话具体描述这件事（如果 is_event 为 false，留空字符串）",
-  "emotion": "这件事对应的情绪标签，例如 happy / curious / sad / touched / neutral",
+  "user_emotion": "用户本人的情绪，只能是 happy / sad / anxious / angry / embarrassed / neutral",
+  "emotion": "Mio 对这件事的情绪，只能是 happy / shy / curious / sad / touched / worried / neutral",
   "impact": "increase_bond 或 increase_affinity 或 none",
   "importance": 0.0到1.0之间的数字，表示这件事的重要程度
 }}
@@ -168,6 +169,9 @@ def extract_event(api_key, model, user_message, ai_reply, base_url=None):
 - increase_bond：能显著增进感情的事件（用户表达关心、分享心事、确认情感等），importance 通常 >= 0.7
 - increase_affinity：一般的好感类事件（提到喜好等），importance 通常在 0.4~0.7
 - none：普通对话，importance 通常 < 0.4
+- 用户夸 Mio 可爱、漂亮、声音好听或直接表达喜欢，而且 Mio 的回复明显不好意思、结巴或躲闪时，emotion 应为 shy
+- 用户夸 Mio 的贝斯、努力、进步或成果，而且她自然地接受了夸奖时，emotion 应为 happy
+- 用户本人难过或紧张时，把 user_emotion 标成 sad 或 anxious；Mio 的 emotion 通常应为 worried，而不是把用户的难过直接复制成 Mio 的 sad
 
 用户说的话：
 {user_message}
@@ -207,6 +211,7 @@ AI的回复：
         "id": uuid.uuid4().hex,
         "event": event_text,
         "emotion": result["emotion"],
+        "user_emotion": result["user_emotion"],
         "impact": result["impact"],
         "importance": result["importance"],
         "notified": False,

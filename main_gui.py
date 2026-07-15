@@ -172,6 +172,13 @@ MOOD_DISPLAY = {
     "tired": ("😪", "疲惫"),
     "neutral": ("🙂", "平静"),
 }
+MODIFIER_DISPLAY = {
+    "worried": ("😟", "担心"),
+    "touched": ("🥹", "感动"),
+    "curious": ("🤔", "好奇"),
+    "surprised": ("😮", "惊讶"),
+    "annoyed": ("😑", "无奈"),
+}
 
 CURSOR_BLINK_INTERVAL_MS = 500
 TYPING_DOT_INTERVAL_MS = 450
@@ -759,6 +766,10 @@ class MainWindow(QMainWindow):
         mood = self.emotion.get("mood", "neutral")
         energy = self.emotion.get("energy", 0)
         icon, mood_text = MOOD_DISPLAY.get(mood, ("🙂", mood))
+        modifier = self.emotion.get("modifier", "none")
+        modifier_strength = self.emotion.get("modifier_strength", 0.0)
+        if mood != "tired" and modifier_strength >= 0.3 and modifier in MODIFIER_DISPLAY:
+            icon, mood_text = MODIFIER_DISPLAY[modifier]
 
         affection = self.relationship.get("affection", 0)
         familiarity = self.relationship.get("familiarity", 0)
@@ -959,7 +970,13 @@ class MainWindow(QMainWindow):
         if not self.tts_enabled or self.speech_service is None or not text:
             return
         mood = self.emotion.get("mood", "neutral")
-        if self.speech_service.speak(text, mood):
+        if self.speech_service.speak(
+            text,
+            mood,
+            emotion_strength=self.emotion.get("mood_strength", 1.0),
+            modifier=self.emotion.get("modifier", "none"),
+            fatigue_strength=self.emotion.get("fatigue_strength", 0.0),
+        ):
             self.character_controller.on_speech_preparing()
 
     def _on_speech_audio_ready(self, audio):

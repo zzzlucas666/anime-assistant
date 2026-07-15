@@ -31,6 +31,7 @@ DEFAULT_AIVIS_TIMEOUT_SECONDS = 60.0
 DEFAULT_AIVIS_MAX_CHARS = 56
 DEFAULT_TTS_BACKEND = "aivis"
 MIO_TTS_BACKEND = "mio_style_bert_vits2"
+MIO_GPT_SOVITS_BACKEND = "mio_gpt_sovits_v2proplus"
 DEFAULT_MIO_TTS_PYTHON = (
     "data/training_tools/Style-Bert-VITS2/venv/Scripts/python.exe"
 )
@@ -47,6 +48,56 @@ DEFAULT_MIO_TTS_STYLE_VECTORS = (
     "data/mio_voice_dataset/style_bert_vits2/model_assets/mio_pilot_v1/"
     "style_vectors.npy"
 )
+DEFAULT_MIO_GPT_SOVITS_PYTHON = (
+    "data/training_tools/GPT-SoVITS/.venv/Scripts/python.exe"
+)
+DEFAULT_MIO_GPT_SOVITS_WORKER = "tts_gpt_sovits_worker.py"
+DEFAULT_MIO_GPT_SOVITS_REPO = "data/training_tools/GPT-SoVITS"
+DEFAULT_MIO_GPT_SOVITS_GPT_WEIGHTS = (
+    "data/mio_voice_dataset/gpt_sovits/v2proplus_v1/weights/gpt/"
+    "mio_v2proplus_v1-e15.ckpt"
+)
+DEFAULT_MIO_GPT_SOVITS_SOVITS_WEIGHTS = (
+    "data/mio_voice_dataset/gpt_sovits/v2proplus_v1/weights/sovits/"
+    "mio_v2proplus_v1_e8_s768.pth"
+)
+DEFAULT_MIO_GPT_SOVITS_REFERENCES = {
+    "neutral": {
+        "audio": (
+            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
+            "mio_pilot_0011.wav"
+        ),
+        "prompt": "いろいろあるなぁ、どれにしよう。迷うなぁ、これなんかどうかな。",
+    },
+    "happy": {
+        "audio": (
+            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
+            "mio_pilot_0026.wav"
+        ),
+        "prompt": "行ってね。ノリノリで、ハイテンションでゴー。飛ばすぞ、全力でついてこい。",
+    },
+    "shy": {
+        "audio": (
+            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
+            "mio_pilot_0029.wav"
+        ),
+        "prompt": "恥ずかしい。もう今日は帰ろうかな。こんなんじゃ武道館なんて。",
+    },
+    "sad": {
+        "audio": (
+            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
+            "mio_pilot_0046.wav"
+        ),
+        "prompt": "うまく弾けなかった。今日はダメみたいだ。",
+    },
+    "tired": {
+        "audio": (
+            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
+            "mio_pilot_0047.wav"
+        ),
+        "prompt": "食べ過ぎちゃった。眠くなってきた。",
+    },
+}
 _MIO_EVENT_PREFIX = "MIO_TTS_EVENT\t"
 DEFAULT_MOOD_SPEAKERS = {
     "neutral": 1878365376,  # コハク / ノーマル
@@ -67,6 +118,10 @@ class AivisSpeechError(RuntimeError):
 
 class MioStyleBertError(RuntimeError):
     """本地 Mio Style-Bert-VITS2 进程无法完成请求。"""
+
+
+class MioGPTSoVITSError(RuntimeError):
+    """本地 Mio GPT-SoVITS V2ProPlus 进程无法完成请求。"""
 
 
 @dataclass(frozen=True)
@@ -431,6 +486,197 @@ class MioStyleBertClient:
                 return event
 
 
+class MioGPTSoVITSClient(MioStyleBertClient):
+    """通过独立 Python 3.10 常驻进程调用 Mio V2ProPlus e15。"""
+
+    backend_name = MIO_GPT_SOVITS_BACKEND
+    supports_mood_reference = True
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.python_path = resolve_project_path(
+            config.get("mio_gpt_sovits_python", DEFAULT_MIO_GPT_SOVITS_PYTHON)
+        )
+        self.worker_path = resolve_project_path(
+            config.get("mio_gpt_sovits_worker", DEFAULT_MIO_GPT_SOVITS_WORKER)
+        )
+        self.repo_path = resolve_project_path(
+            config.get("mio_gpt_sovits_repo", DEFAULT_MIO_GPT_SOVITS_REPO)
+        )
+        self.gpt_weights_path = resolve_project_path(
+            config.get(
+                "mio_gpt_sovits_gpt_weights",
+                DEFAULT_MIO_GPT_SOVITS_GPT_WEIGHTS,
+            )
+        )
+        self.sovits_weights_path = resolve_project_path(
+            config.get(
+                "mio_gpt_sovits_sovits_weights",
+                DEFAULT_MIO_GPT_SOVITS_SOVITS_WEIGHTS,
+            )
+        )
+        configured_references = config.get("mio_gpt_sovits_references")
+        if not isinstance(configured_references, dict):
+            configured_references = DEFAULT_MIO_GPT_SOVITS_REFERENCES
+        self.references = {}
+        for mood, fallback in DEFAULT_MIO_GPT_SOVITS_REFERENCES.items():
+            configured = configured_references.get(mood)
+            if not isinstance(configured, dict):
+                configured = fallback
+            audio_path = resolve_project_path(
+                configured.get("audio", fallback["audio"])
+            )
+            prompt = str(configured.get("prompt", fallback["prompt"]) or "").strip()
+            self.references[mood] = {"audio": str(audio_path), "prompt": prompt}
+        self.endpoint = (
+            f"local GPT-SoVITS {self.gpt_weights_path.name} / "
+            f"{self.sovits_weights_path.name}"
+        )
+
+    def synthesize(
+        self,
+        text,
+        _speaker_id=0,
+        speed_scale=1.0,
+        volume_scale=1.0,
+        mood="neutral",
+    ):
+        with self._request_lock:
+            self._ensure_process()
+            request_id = uuid.uuid4().hex
+            request = {
+                "id": request_id,
+                "text": text,
+                "mood": mood,
+                "speed_scale": speed_scale,
+                "volume_scale": volume_scale,
+            }
+            with self._lock:
+                try:
+                    self._process.stdin.write(
+                        json.dumps(request, ensure_ascii=False) + "\n"
+                    )
+                    self._process.stdin.flush()
+                except (AttributeError, BrokenPipeError, OSError) as exc:
+                    self.close()
+                    raise MioGPTSoVITSError(
+                        f"GPT-SoVITS request failed: {exc}"
+                    ) from exc
+
+            try:
+                event = self._wait_for_event(request_id, self.synthesis_timeout)
+            except Exception:
+                self.close()
+                raise
+            if event.get("type") == "error":
+                raise MioGPTSoVITSError(
+                    event.get("message") or "GPT-SoVITS synthesis failed"
+                )
+            output_path = Path(event.get("path", "")).resolve(strict=False)
+            output_root = Path(self.output_dir).resolve(strict=False)
+            if output_root not in output_path.parents:
+                raise MioGPTSoVITSError("GPT-SoVITS returned an unsafe output path")
+            try:
+                return output_path.read_bytes()
+            except OSError as exc:
+                raise MioGPTSoVITSError(
+                    f"Cannot read GPT-SoVITS audio: {exc}"
+                ) from exc
+            finally:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _ensure_process(self):
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                return
+            required = {
+                "Python 3.10": self.python_path,
+                "worker": self.worker_path,
+                "GPT-SoVITS": self.repo_path,
+                "GPT e15 weights": self.gpt_weights_path,
+                "SoVITS e8 weights": self.sovits_weights_path,
+            }
+            for mood, reference in self.references.items():
+                required[f"{mood} reference"] = Path(reference["audio"])
+            missing = [
+                label
+                for label, path in required.items()
+                if path is None or not Path(path).exists()
+            ]
+            if missing:
+                raise MioGPTSoVITSError(
+                    "Missing GPT-SoVITS files: " + ", ".join(missing)
+                )
+
+            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+            event_queue = queue.Queue()
+            self._events = event_queue
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
+            env["TOKENIZERS_PARALLELISM"] = "false"
+            command = [
+                str(self.python_path),
+                str(self.worker_path),
+                "--repo",
+                str(self.repo_path),
+                "--gpt-weights",
+                str(self.gpt_weights_path),
+                "--sovits-weights",
+                str(self.sovits_weights_path),
+                "--references",
+                json.dumps(self.references, ensure_ascii=False),
+                "--output-dir",
+                str(self.output_dir),
+                "--device",
+                self.device,
+            ]
+            try:
+                self._process = subprocess.Popen(
+                    command,
+                    cwd=str(self.repo_path),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except OSError as exc:
+                self._process = None
+                raise MioGPTSoVITSError(
+                    f"Cannot start GPT-SoVITS worker: {exc}"
+                ) from exc
+
+            self._reader_thread = threading.Thread(
+                target=self._read_worker_output,
+                args=(self._process, event_queue),
+                name="mio-gpt-sovits-output",
+                daemon=True,
+            )
+            self._reader_thread.start()
+            try:
+                event = self._wait_for_event(None, self.startup_timeout)
+            except Exception:
+                self.close()
+                raise
+            if event.get("type") != "ready":
+                message = event.get("message") or "GPT-SoVITS worker failed to start"
+                self.close()
+                raise MioGPTSoVITSError(message)
+            logger.info(
+                "Mio GPT-SoVITS 已加载：%s / %s",
+                self.gpt_weights_path.name,
+                self.sovits_weights_path.name,
+            )
+
+
 def build_mouth_envelope(wav_data, window_ms=33):
     """从 PCM WAV 计算 0..1 的短时响度，供 Live2D 实际音频口型使用。"""
     try:
@@ -544,6 +790,11 @@ class SpeechSynthesisService:
             self.fallback_client = (
                 aivis_client if config.get("tts_fallback_to_aivis", True) else None
             )
+        elif backend == MIO_GPT_SOVITS_BACKEND:
+            self.client = MioGPTSoVITSClient(config)
+            self.fallback_client = (
+                aivis_client if config.get("tts_fallback_to_aivis", True) else None
+            )
         else:
             self.client = aivis_client
             self.fallback_client = None
@@ -559,11 +810,20 @@ class SpeechSynthesisService:
         self._thread = threading.Thread(target=self._run, name="speech-tts", daemon=True)
         self._thread.start()
 
-    def speak(self, text, mood="neutral"):
+    def speak(
+        self,
+        text,
+        mood="neutral",
+        emotion_strength=1.0,
+        modifier="none",
+        fatigue_strength=0.0,
+    ):
         if self._stop_event.is_set() or not prepare_spoken_text(text):
             return False
         try:
-            self._jobs.put_nowait((text, mood))
+            self._jobs.put_nowait(
+                (text, mood, emotion_strength, modifier, fatigue_strength)
+            )
             return True
         except queue.Full:
             logger.warning("TTS 队列已满，本条语音已跳过")
@@ -589,7 +849,26 @@ class SpeechSynthesisService:
             job = self._jobs.get()
             if job is None:
                 return
-            text, mood = job
+            if len(job) >= 5:
+                text, mood, emotion_strength, modifier, fatigue_strength = job[:5]
+            else:
+                # 兼容旧测试、旧队列和可能仍在运行的调用方。
+                text, mood = job
+                emotion_strength = 1.0
+                modifier = "none"
+                fatigue_strength = 0.0
+            speed_multiplier = self._emotion_speed_multiplier(
+                mood,
+                emotion_strength,
+                modifier,
+                fatigue_strength,
+            )
+            mood = self._effective_mood(
+                mood,
+                emotion_strength,
+                modifier,
+                fatigue_strength,
+            )
             try:
                 spoken_text = self.translator.translate(text) if self.translator else prepare_spoken_text(text)
                 speaker_id = self._speaker_for_mood(mood)
@@ -614,7 +893,11 @@ class SpeechSynthesisService:
                                 detail or f"TTS backend is unavailable at {client.endpoint}"
                             )
                         audio_batch = self._synthesize_sentences(
-                            client, sentences, speaker_id
+                            client,
+                            sentences,
+                            speaker_id,
+                            mood,
+                            speed_multiplier=speed_multiplier,
                         )
                         if client_index:
                             logger.warning(
@@ -641,18 +924,29 @@ class SpeechSynthesisService:
                 logger.warning("TTS 生成失败，已降级为文字回复：%s", exc)
                 self.on_error(str(exc))
 
-    def _synthesize_sentences(self, client, sentences, speaker_id):
+    def _synthesize_sentences(
+        self,
+        client,
+        sentences,
+        speaker_id,
+        mood="neutral",
+        speed_multiplier=1.0,
+    ):
         """完整合成所有片段；任一失败时由调用方整条回退或取消。"""
         audio_batch = []
         for sentence in sentences:
             if self._stop_event.is_set():
                 raise AivisSpeechError("TTS service is shutting down")
-            wav_data = client.synthesize(
+            synthesis_args = (
                 sentence,
                 speaker_id,
-                self.config.get("tts_speed_scale", 1.0),
+                self.config.get("tts_speed_scale", 1.0) * speed_multiplier,
                 self.config.get("tts_volume_scale", 1.0),
             )
+            if getattr(client, "supports_mood_reference", False):
+                wav_data = client.synthesize(*synthesis_args, mood=mood)
+            else:
+                wav_data = client.synthesize(*synthesis_args)
             audio_batch.append(
                 SpeechAudio(
                     wav_data=wav_data,
@@ -670,3 +964,52 @@ class SpeechSynthesisService:
             return int(value)
         except (TypeError, ValueError):
             return DEFAULT_MOOD_SPEAKERS["neutral"]
+
+    @staticmethod
+    def _effective_mood(mood, emotion_strength, modifier, fatigue_strength):
+        """把连续情绪强度压到现有五组语音参考，避免轻微情绪直接满强度。"""
+        try:
+            strength = max(0.0, min(1.0, float(emotion_strength)))
+        except (TypeError, ValueError):
+            strength = 1.0
+        try:
+            fatigue = max(0.0, min(1.0, float(fatigue_strength)))
+        except (TypeError, ValueError):
+            fatigue = 0.0
+
+        if mood == "tired" or fatigue >= 0.65:
+            return "tired"
+        if mood in {"happy", "shy", "sad"} and strength < 0.38:
+            return "neutral"
+        # touched 只增强已有开心，不把“关心用户”误读成 Mio 自己悲伤。
+        if mood == "neutral" and modifier == "touched" and strength >= 0.5:
+            return "happy"
+        return mood if mood in {"neutral", "happy", "shy", "sad", "tired"} else "neutral"
+
+    @staticmethod
+    def _emotion_speed_multiplier(mood, emotion_strength, modifier, fatigue_strength):
+        """小幅调整语速，保留音色稳定性，同时让连续强度进入语音表现。"""
+        try:
+            strength = max(0.0, min(1.0, float(emotion_strength)))
+        except (TypeError, ValueError):
+            strength = 0.0
+        try:
+            fatigue = max(0.0, min(1.0, float(fatigue_strength)))
+        except (TypeError, ValueError):
+            fatigue = 0.0
+
+        multiplier = 1.0
+        if mood == "happy":
+            multiplier += 0.05 * strength
+        elif mood == "shy":
+            multiplier -= 0.035 * strength
+        elif mood == "sad":
+            multiplier -= 0.06 * strength
+        if modifier == "worried":
+            multiplier -= 0.035
+        elif modifier == "surprised":
+            multiplier += 0.035
+        elif modifier == "annoyed":
+            multiplier -= 0.02
+        multiplier -= 0.08 * fatigue
+        return max(0.88, min(1.08, multiplier))

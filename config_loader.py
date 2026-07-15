@@ -18,6 +18,12 @@ from tts_service import (
     DEFAULT_MIO_TTS_REPO,
     DEFAULT_MIO_TTS_STYLE_VECTORS,
     DEFAULT_MIO_TTS_WORKER,
+    DEFAULT_MIO_GPT_SOVITS_GPT_WEIGHTS,
+    DEFAULT_MIO_GPT_SOVITS_PYTHON,
+    DEFAULT_MIO_GPT_SOVITS_REFERENCES,
+    DEFAULT_MIO_GPT_SOVITS_REPO,
+    DEFAULT_MIO_GPT_SOVITS_SOVITS_WEIGHTS,
+    DEFAULT_MIO_GPT_SOVITS_WORKER,
     DEFAULT_MOOD_SPEAKERS,
     DEFAULT_TTS_BACKEND,
 )
@@ -62,6 +68,15 @@ DEFAULT_CONFIG = {
     "mio_tts_noise": 0.5,
     "mio_tts_noise_w": 0.7,
     "mio_tts_style_weight": 1.0,
+    "mio_gpt_sovits_python": DEFAULT_MIO_GPT_SOVITS_PYTHON,
+    "mio_gpt_sovits_worker": DEFAULT_MIO_GPT_SOVITS_WORKER,
+    "mio_gpt_sovits_repo": DEFAULT_MIO_GPT_SOVITS_REPO,
+    "mio_gpt_sovits_gpt_weights": DEFAULT_MIO_GPT_SOVITS_GPT_WEIGHTS,
+    "mio_gpt_sovits_sovits_weights": DEFAULT_MIO_GPT_SOVITS_SOVITS_WEIGHTS,
+    "mio_gpt_sovits_references": {
+        mood: reference.copy()
+        for mood, reference in DEFAULT_MIO_GPT_SOVITS_REFERENCES.items()
+    },
     "proactive_check_interval_minutes": 5,
     "proactive_idle_threshold_minutes": 30,
     "proactive_min_interval_minutes": 120,

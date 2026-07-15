@@ -95,6 +95,39 @@ class CharacterControllerTests(unittest.TestCase):
         self.assertAlmostEqual(controller._emotion_targets["ParamBrowLY"], -0.8125)
         self.assertAlmostEqual(controller._emotion_targets["ParamCheek"], 0.5)
 
+    def test_mood_strength_scales_expression_without_changing_preset(self):
+        controller = self.make_controller(
+            parameter_map={"happy": {"ParamCheek": 1.0}},
+        )
+
+        controller.on_emotion_changed({"mood": "happy", "mood_strength": 0.5})
+
+        self.assertAlmostEqual(controller._emotion_targets["ParamCheek"], 0.5)
+
+    def test_same_mood_reacts_to_strength_changes(self):
+        controller = self.make_controller(
+            parameter_map={"happy": {"ParamCheek": 1.0}},
+        )
+        controller.on_emotion_changed({"mood": "happy", "mood_strength": 0.4})
+        first = controller._emotion_targets["ParamCheek"]
+
+        controller.on_emotion_changed({"mood": "happy", "mood_strength": 0.8})
+
+        self.assertGreater(controller._emotion_targets["ParamCheek"], first)
+
+    def test_transient_modifier_overlays_primary_expression(self):
+        controller = self.make_controller(
+            parameter_map={"neutral": {"ParamBrowLY": 0.0}},
+        )
+
+        controller.on_emotion_changed({
+            "mood": "neutral",
+            "modifier": "worried",
+            "modifier_strength": 0.8,
+        })
+
+        self.assertLess(controller._emotion_targets["ParamBrowLY"], 0.0)
+
     def test_programmatic_blink_closes_both_eyes(self):
         controller = self.make_controller()
         controller._next_blink_at = self.clock.value

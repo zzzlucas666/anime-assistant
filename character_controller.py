@@ -72,6 +72,57 @@ PROCEDURAL_PARAMETERS = {
     "ParamBreath",
 }
 
+MODIFIER_PARAMETER_MAP = {
+    "worried": {
+        "ParamEyeLOpen": 0.9,
+        "ParamEyeROpen": 0.9,
+        "ParamBrowLY": -0.1,
+        "ParamBrowRY": -0.1,
+        "ParamMouthForm": -0.08,
+        "ParamAngleY": -1.2,
+    },
+    "touched": {
+        "ParamEyeLSmile": 0.22,
+        "ParamEyeRSmile": 0.22,
+        "ParamMouthForm": 0.18,
+        "ParamCheek": 0.22,
+    },
+    "curious": {
+        "ParamEyeLOpen": 1.0,
+        "ParamEyeROpen": 1.0,
+        "ParamBrowLY": 0.06,
+        "ParamBrowRY": 0.04,
+        "ParamAngleX": 2.4,
+        "ParamAngleZ": 1.4,
+    },
+    "surprised": {
+        "ParamEyeLOpen": 1.0,
+        "ParamEyeROpen": 1.0,
+        "ParamBrowLY": 0.12,
+        "ParamBrowRY": 0.12,
+        "ParamMouthOpenY": 0.08,
+    },
+    "annoyed": {
+        "ParamEyeLOpen": 0.88,
+        "ParamEyeROpen": 0.88,
+        "ParamBrowLY": -0.06,
+        "ParamBrowRY": -0.06,
+        "ParamBrowLAngle": -0.08,
+        "ParamBrowRAngle": 0.08,
+        "ParamMouthForm": -0.12,
+        "ParamAngleX": 1.8,
+    },
+}
+
+FATIGUE_PARAMETER_MAP = {
+    "ParamEyeLOpen": 0.66,
+    "ParamEyeROpen": 0.66,
+    "ParamBrowLY": -0.06,
+    "ParamBrowRY": -0.06,
+    "ParamMouthForm": -0.1,
+    "ParamAngleY": -2.0,
+}
+
 
 class CharacterController:
     """独立于 GUI 的角色表现控制器，也作为后续 TTS 嘴型的接入点。"""
@@ -112,6 +163,11 @@ class CharacterController:
 
         self.is_speaking = False
         self._last_emotion = None
+        self._last_emotion_signature = None
+        self._emotion_strength = 1.0
+        self._modifier = "none"
+        self._modifier_strength = 0.0
+        self._fatigue_strength = 0.0
         self._active_parameters = {}
         self._emotion_targets = {}
         self._current_parameters = {}
@@ -151,12 +207,41 @@ class CharacterController:
 
     def on_emotion_changed(self, emotion):
         mood = (emotion or {}).get("mood", "neutral")
-        if mood == self._last_emotion:
+        default_strength = 0.0 if mood == "neutral" else 1.0
+        try:
+            strength = max(0.0, min(1.0, float((emotion or {}).get("mood_strength", default_strength))))
+        except (TypeError, ValueError):
+            strength = default_strength
+        modifier = (emotion or {}).get("modifier", "none")
+        try:
+            modifier_strength = max(0.0, min(1.0, float((emotion or {}).get("modifier_strength", 0.0))))
+        except (TypeError, ValueError):
+            modifier_strength = 0.0
+        try:
+            fatigue_strength = max(0.0, min(1.0, float((emotion or {}).get("fatigue_strength", 0.0))))
+        except (TypeError, ValueError):
+            fatigue_strength = 0.0
+
+        signature = (
+            mood,
+            round(strength, 3),
+            modifier,
+            round(modifier_strength, 3),
+            round(fatigue_strength, 3),
+        )
+        if signature == self._last_emotion_signature:
             return
 
+        mood_changed = mood != self._last_emotion
         self._last_emotion = mood
-        self._apply_expression(mood)
-        self._apply_motion(mood)
+        self._last_emotion_signature = signature
+        self._emotion_strength = strength
+        self._modifier = modifier
+        self._modifier_strength = modifier_strength
+        self._fatigue_strength = fatigue_strength
+        if mood_changed:
+            self._apply_expression(mood)
+            self._apply_motion(mood)
         self._apply_parameters(mood)
 
     def refresh_current_expression(self):
@@ -305,7 +390,7 @@ class CharacterController:
         for param_id, value in (parameters or {}).items():
             if not self._supports_parameter(param_id):
                 continue
-            scaled = self._scale_parameter_value(mood, param_id, value)
+            scaled = self._scale_parameter_value(mood, param_id, value, strength=1.0)
             preview[param_id] = self._clamp_parameter(param_id, scaled)
         self._manual_parameters = preview
 
@@ -607,14 +692,39 @@ class CharacterController:
             if not self._supports_parameter(param_id):
                 continue
             filtered[param_id] = self._scale_parameter_value(
-                mood, param_id, value
+                mood, param_id, value, strength=self._emotion_strength
+            )
+
+        modifier_params = MODIFIER_PARAMETER_MAP.get(self._modifier) or {}
+        self._add_parameter_overlay(
+            filtered,
+            modifier_params,
+            self._modifier_strength,
+        )
+        if mood != "tired":
+            self._add_parameter_overlay(
+                filtered,
+                FATIGUE_PARAMETER_MAP,
+                self._fatigue_strength,
             )
 
         self._emotion_targets = filtered
         # 保留旧属性含义，避免外部诊断代码或测试依赖它。
         self._active_parameters = filtered.copy()
 
-    def _scale_parameter_value(self, mood, param_id, value):
+    def _add_parameter_overlay(self, parameters, overlay, strength):
+        if strength <= 0:
+            return
+        for param_id, target_value in overlay.items():
+            if not self._supports_parameter(param_id):
+                continue
+            neutral_value = PARAMETER_DEFAULTS.get(param_id, 0.0)
+            current_value = parameters.get(param_id, neutral_value)
+            parameters[param_id] = current_value + (
+                float(target_value) - neutral_value
+            ) * self.expression_intensity * strength
+
+    def _scale_parameter_value(self, mood, param_id, value, strength=None):
         try:
             numeric_value = float(value)
         except (TypeError, ValueError):
@@ -622,12 +732,16 @@ class CharacterController:
         if mood == "neutral":
             return numeric_value
 
+        if strength is None:
+            strength = self._emotion_strength if mood == self._last_emotion else 1.0
+        strength = max(0.0, min(1.0, float(strength)))
+
         # 表情强度必须从参数的中性值向外放大。比如 EyeOpen 的中性值是 1，
         # sad=0.65 应该随强度升高而更闭；直接做 0.65 * 1.25 反而会更睁开。
         neutral_value = PARAMETER_DEFAULTS.get(param_id, 0.0)
         return neutral_value + (
             numeric_value - neutral_value
-        ) * self.expression_intensity
+        ) * self.expression_intensity * strength
 
     def _supports_parameter(self, param_id):
         return not self.available_parameters or param_id in self.available_parameters

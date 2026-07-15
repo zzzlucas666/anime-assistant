@@ -50,6 +50,52 @@ def build_relationship_hint(relationship):
     return "\n".join(hints)
 
 
+def build_turn_emotion_hint(turn_emotion):
+    """把本轮反应规划翻译成自然语言约束，避免模型直接复述内部标签。"""
+    if not isinstance(turn_emotion, dict):
+        return "本轮没有额外的即时情绪提示，按当前心情自然回应。"
+
+    user_labels = {
+        "neutral": "没有明确情绪",
+        "happy": "开心",
+        "sad": "难过",
+        "anxious": "紧张或担心",
+        "angry": "生气",
+        "embarrassed": "尴尬",
+    }
+    mood_labels = {
+        "neutral": "保持平静",
+        "happy": "感到开心",
+        "shy": "有些害羞",
+        "sad": "感到低落",
+    }
+    modifier_labels = {
+        "none": "没有额外反应",
+        "worried": "关心并有些担心对方",
+        "touched": "受到触动",
+        "curious": "有一点好奇",
+        "surprised": "短暂惊讶",
+        "annoyed": "有一点无奈或轻微不满",
+    }
+    try:
+        intensity = float(turn_emotion.get("intensity", 0.0))
+    except (TypeError, ValueError):
+        intensity = 0.0
+    if intensity >= 0.75:
+        intensity_hint = "反应比较明显"
+    elif intensity >= 0.4:
+        intensity_hint = "反应自然但克制"
+    else:
+        intensity_hint = "只需要很轻微地表现"
+    return (
+        f"用户此刻：{user_labels.get(turn_emotion.get('user_mood'), '没有明确情绪')}；"
+        f"Mio 本轮反应：{mood_labels.get(turn_emotion.get('mood'), '保持平静')}；"
+        f"短暂反应：{modifier_labels.get(turn_emotion.get('modifier'), '没有额外反应')}；"
+        f"{intensity_hint}。\n"
+        "先接住用户此刻的感受，再自然回答；不要说出任何标签、分数或系统判断。"
+    )
+
+
 def build_system_prompt(context, query_text=None):
     """
     query_text: 当前这轮用户说的话，传给 context_builder 做语义检索，
@@ -60,6 +106,7 @@ def build_system_prompt(context, query_text=None):
     profile = context["profile"]
     emotion = context["emotion"]
     relationship = context["relationship"]
+    turn_emotion_hint = build_turn_emotion_hint(context.get("turn_emotion"))
 
     memory_context = build_memory_context(query_text=query_text)
     event_memory_hint = memory_context["event_memory_hint"]
@@ -94,7 +141,13 @@ def build_system_prompt(context, query_text=None):
 
 # 【当前情绪状态】
 心情：{emotion['mood']}
+心情强度：{emotion.get('mood_strength', 0.0)}
+短暂反应：{emotion.get('modifier', 'none')}
+疲劳程度：{emotion.get('fatigue_strength', 0.0)}
 精力：{emotion['energy']}
+
+# 【本轮即时反应（优先于上一轮心情）】
+{turn_emotion_hint}
 
 # 【当前关系状态（非常重要）】
 好感度 affection：{relationship['affection']}
@@ -183,8 +236,23 @@ def build_system_prompt(context, query_text=None):
 如果 mood = sad：
 - 语气柔和低落
 
-如果 energy < 30：
-- 回复变得更短、显得疲惫
+如果短暂反应 = worried：
+- 重点是关心对方，不要把对方的难过误写成自己也在伤心
+
+如果短暂反应 = touched：
+- 可以真诚地表示感谢或开心，但不要突然变得煽情
+
+如果短暂反应 = curious：
+- 可以自然追问一个必要的小问题，不要连续追问
+
+如果短暂反应 = surprised：
+- 只表现一瞬间的惊讶，很快回到当前话题
+
+如果短暂反应 = annoyed：
+- 可以轻轻吐槽或认真反驳，不要攻击对方
+
+根据疲劳程度连续调整语气：低于 0.35 正常，0.35~0.65 稍微简短，
+高于 0.65 才明显显得疲惫。不要再仅凭 energy 的单一阈值突然切换。
 
 # 【重要限制】
 - 不要频繁使用舞台剧式动作描写
