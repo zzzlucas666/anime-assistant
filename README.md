@@ -71,7 +71,7 @@ pip install -r requirements-all.txt
 | `live2d_waiting_gaze_intensity` | 等待语音时视线游移幅度倍率（0～2） | `1.0` |
 | `live2d_waiting_motion_speed` | 待机头部、身体、眉毛和视线节奏倍率 | `1.4` |
 | `tts_enabled` | 启用语音 | `true` |
-| `tts_backend` | 语音后端：`aivis` 或 `mio_style_bert_vits2` | `aivis` |
+| `tts_backend` | 语音后端：`aivis`、`mio_style_bert_vits2` 或 `mio_gpt_sovits_v2proplus` | `aivis` |
 | `tts_fallback_to_aivis` | Mio 本地模型失败时是否整条回退 AivisSpeech | `true` |
 | `tts_translate_to_japanese` | 中文回复是否另行翻译为日语发声 | `true` |
 | `tts_speed_scale` | 语速倍率 | `1.0` |
@@ -82,6 +82,8 @@ pip install -r requirements-all.txt
 | `aivis_mood_speakers` | 五种心情对应的 AivisSpeech Style ID | コハク的四种风格 |
 | `mio_tts_model` | Mio `.safetensors` 模型路径（相对项目根目录或绝对路径） | 第一版 2000 步模型路径 |
 | `mio_tts_python` | Style-Bert-VITS2 独立 Python 3.10 路径 | `data/training_tools/.../python.exe` |
+| `mio_gpt_sovits_gpt_weights` | Mio GPT-SoVITS 语义权重 | V2ProPlus GPT e15 |
+| `mio_gpt_sovits_sovits_weights` | Mio GPT-SoVITS 声学权重 | V2ProPlus SoVITS e8 |
 | `proactive_check_interval_minutes` | 主动聊天检查周期 | `5` |
 | `proactive_idle_threshold_minutes` | 空闲时间参考阈值 | `30` |
 | `proactive_min_interval_minutes` | 两次主动消息最小间隔 | `120` |
@@ -103,14 +105,16 @@ python main_gui.py
 
 ### Mio 本地语音与 AivisSpeech
 
-将 `tts_backend` 设为 `mio_style_bert_vits2` 后，GUI 会在第一次需要语音时
-启动隐藏的 Python 3.10 后台进程，并把 Mio 模型常驻内存；主程序仍可使用
-Python 3.14 和 Live2D，不需要在同一环境安装两套互相冲突的依赖。模型和
-训练环境位于被 Git 忽略的 `data/` 目录，因此换电脑后需要单独复制或重新
-准备这些本地文件。窗口关闭时后台语音进程会一并退出。
+将 `tts_backend` 设为 `mio_style_bert_vits2` 或
+`mio_gpt_sovits_v2proplus` 后，GUI 会在第一次需要语音时启动隐藏的
+Python 3.10 后台进程，并把 Mio 模型常驻内存；主程序仍可使用 Python 3.14
+和 Live2D，不需要在同一环境安装两套互相冲突的依赖。模型和训练环境位于
+被 Git 忽略的 `data/` 目录，因此换电脑后需要单独复制或重新准备这些本地
+文件。窗口关闭时后台语音进程会一并退出。
 
-当前 Mio 模型只有 `Neutral` 风格；界面心情仍会驱动 Live2D 表情，但语音
-情绪暂时共用同一个风格向量。后续补充分类数据后可以再加入多风格切换。
+Style-Bert-VITS2 第一版只有 `Neutral` 风格。GPT-SoVITS V2ProPlus 后端固定
+使用 GPT e15 与 SoVITS e8，并根据 `neutral`、`happy`、`shy`、`sad`、
+`tired` 选择对应的 Mio 原声参考片段，使语音情绪与 Live2D 心情同步。
 
 当 `tts_fallback_to_aivis` 为 `true` 时，本地模型缺失、启动失败或合成超时
 会让整条回复重新交给 AivisSpeech，不会混播两种音色或只播放前半句。
@@ -134,6 +138,18 @@ GUI 顶部的“调表情”窗口提供“待机摆头/头发强度”滑块。
 “保存视线强度”独立保存。
 “待机动作速度”范围为 `0.50×～2.00×`，默认 `1.40×`；修改速度不会重置
 当前动作相位，因此实时预览时不会突然跳动。
+
+## 情绪状态机
+
+每轮回复前会先区分“用户当前感受”和“Mio 应有的反应”，因此用户难过时
+Mio 会表现为担心和关心，而不是简单复制成自己的低落。持久心情使用
+`mood + mood_strength`，并叠加有独立持续轮数的 `worried`、`touched`、
+`curious`、`surprised`、`annoyed` 短暂反应。心情会按对话轮数和真实时间
+自然淡出，轻微的正负转变需要连续信号，候选信号超过有效期会自动清除。
+
+疲劳由精力计算为连续强度，并使用不同的进入/退出阈值避免边界闪烁。
+Live2D 参数、状态栏、回复语气和 TTS 参考音频/轻微语速调整都读取同一份
+情绪状态。
 
 ## 测试
 

@@ -155,6 +155,44 @@ class TTSServiceTests(unittest.TestCase):
             [("ready", "第一句。第二句。", 2)],
         )
 
+    def test_mood_reference_is_forwarded_only_to_capable_backend(self):
+        class MoodClient:
+            supports_mood_reference = True
+
+            def __init__(self):
+                self.moods = []
+
+            def synthesize(self, _text, *_args, mood="neutral"):
+                self.moods.append(mood)
+                return make_test_wav(duration=0.1)
+
+        service = SpeechSynthesisService.__new__(SpeechSynthesisService)
+        service.config = {"tts_speed_scale": 1.0, "tts_volume_scale": 1.0}
+        service._stop_event = threading.Event()
+        client = MoodClient()
+
+        service._synthesize_sentences(client, ["恥ずかしい。"], 0, "shy")
+
+        self.assertEqual(client.moods, ["shy"])
+
+    def test_subtle_mood_uses_neutral_reference_and_fatigue_can_override(self):
+        self.assertEqual(
+            SpeechSynthesisService._effective_mood("happy", 0.2, "none", 0.0),
+            "neutral",
+        )
+        self.assertEqual(
+            SpeechSynthesisService._effective_mood("happy", 0.8, "none", 0.8),
+            "tired",
+        )
+        self.assertGreater(
+            SpeechSynthesisService._emotion_speed_multiplier("happy", 0.8, "none", 0.0),
+            1.0,
+        )
+        self.assertLess(
+            SpeechSynthesisService._emotion_speed_multiplier("neutral", 0.0, "worried", 0.5),
+            1.0,
+        )
+
     def test_unavailable_primary_backend_falls_back_for_the_complete_reply(self):
         class UnavailablePrimary:
             endpoint = "local Mio model"

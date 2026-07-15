@@ -68,6 +68,22 @@ class ConfigurationAndPathTests(unittest.TestCase):
             loaded["mio_tts_model"],
             DEFAULT_CONFIG["mio_tts_model"],
         )
+        self.assertTrue(loaded["mio_gpt_sovits_gpt_weights"].endswith("e15.ckpt"))
+        self.assertIn("shy", loaded["mio_gpt_sovits_references"])
+
+    def test_gpt_sovits_backend_is_preserved_by_config_normalization(self):
+        configured = {
+            "api_key": "test-key",
+            "model": "test-model",
+            "assistant_name": "Mio",
+            "tts_backend": "mio_gpt_sovits_v2proplus",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "settings.json"
+            config_path.write_text(json.dumps(configured), encoding="utf-8")
+            loaded = load_config(config_path)
+
+        self.assertEqual(loaded["tts_backend"], "mio_gpt_sovits_v2proplus")
 
     def test_live2d_parameter_preset_is_saved_without_losing_config(self):
         config = {

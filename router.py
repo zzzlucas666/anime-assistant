@@ -72,6 +72,8 @@ def handle_intent(intent, clean_message, profile, emotion, relationship):
         mood = emotion.get("mood", "")
         energy = emotion.get("energy", "")
         affection = relationship.get("affection", "")
+        modifier = emotion.get("modifier", "none")
+        modifier_strength = emotion.get("modifier_strength", 0.0)
 
         mood_text = {
             "happy": "心情很好",
@@ -79,6 +81,14 @@ def handle_intent(intent, clean_message, profile, emotion, relationship):
             "sad": "心情不太好",
             "tired": "感觉有点累",
         }.get(mood, f"心情是 {mood}")
+        if mood != "tired" and modifier_strength >= 0.3:
+            mood_text = {
+                "worried": "有点担心你",
+                "touched": "有点感动",
+                "curious": "有些好奇",
+                "surprised": "有点惊讶",
+                "annoyed": "稍微有点无奈",
+            }.get(modifier, mood_text)
 
         # 精力 / 累
         if any(k in clean_message for k in ["精力", "累", "疲惫", "困不困", "睡了吗"]):
