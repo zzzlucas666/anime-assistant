@@ -12,6 +12,7 @@ from tts_service import (
     DEFAULT_AIVIS_ENDPOINT,
     DEFAULT_AIVIS_MAX_CHARS,
     DEFAULT_AIVIS_TIMEOUT_SECONDS,
+    DEFAULT_LOCAL_TTS_RETRY_ATTEMPTS,
     DEFAULT_MIO_TTS_CONFIG,
     DEFAULT_MIO_TTS_MODEL,
     DEFAULT_MIO_TTS_PYTHON,
@@ -50,6 +51,7 @@ DEFAULT_CONFIG = {
     "tts_translate_to_japanese": True,
     "tts_speed_scale": 1.0,
     "tts_volume_scale": 1.0,
+    "mio_tts_retry_attempts": DEFAULT_LOCAL_TTS_RETRY_ATTEMPTS,
     "aivis_endpoint": DEFAULT_AIVIS_ENDPOINT,
     "aivis_timeout_seconds": DEFAULT_AIVIS_TIMEOUT_SECONDS,
     "aivis_max_chars_per_request": DEFAULT_AIVIS_MAX_CHARS,
@@ -73,6 +75,7 @@ DEFAULT_CONFIG = {
     "mio_gpt_sovits_repo": DEFAULT_MIO_GPT_SOVITS_REPO,
     "mio_gpt_sovits_gpt_weights": DEFAULT_MIO_GPT_SOVITS_GPT_WEIGHTS,
     "mio_gpt_sovits_sovits_weights": DEFAULT_MIO_GPT_SOVITS_SOVITS_WEIGHTS,
+    "mio_gpt_sovits_startup_timeout_seconds": 180.0,
     "mio_gpt_sovits_references": {
         mood: reference.copy()
         for mood, reference in DEFAULT_MIO_GPT_SOVITS_REFERENCES.items()

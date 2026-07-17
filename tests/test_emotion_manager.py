@@ -1,7 +1,10 @@
 import unittest
 
 from emotion_manager import (
+    has_interaction_signal,
     infer_interaction_emotion,
+    plan_greeting_emotion,
+    plan_proactive_emotion,
     plan_turn_emotion,
     update_emotion,
 )
@@ -26,6 +29,43 @@ class InteractionEmotionTests(unittest.TestCase):
         self.assertEqual(signal["user_mood"], "sad")
         self.assertEqual(signal["mood"], "neutral")
         self.assertEqual(signal["modifier"], "worried")
+        self.assertEqual(signal["voice_style"], "concerned")
+
+    def test_loneliness_takes_priority_over_boredom_and_questions(self):
+        signal = plan_turn_emotion(
+            "感觉暑假好无聊，也挺孤独的，没人找我聊天，有什么办法吗"
+        )
+
+        self.assertEqual(signal["user_mood"], "lonely")
+        self.assertEqual(signal["modifier"], "worried")
+        self.assertEqual(signal["voice_style"], "concerned")
+
+    def test_busy_internship_uses_reassuring_voice_without_happy_mood(self):
+        signal = plan_turn_emotion("确实挺忙的，我最近在实习")
+
+        self.assertEqual(signal["user_mood"], "stressed")
+        self.assertEqual(signal["mood"], "neutral")
+        self.assertEqual(signal["voice_style"], "reassuring")
+
+    def test_bored_advice_request_uses_thoughtful_voice(self):
+        signal = plan_turn_emotion("做什么事情都感到无聊，你有什么好的办法吗")
+
+        self.assertEqual(signal["user_mood"], "bored")
+        self.assertEqual(signal["modifier"], "none")
+        self.assertEqual(signal["voice_style"], "thoughtful")
+
+    def test_ordinary_question_is_conversational_not_curious(self):
+        signal = plan_turn_emotion("桦喵的吉他弹得怎么样？")
+
+        self.assertEqual(signal["modifier"], "none")
+        self.assertEqual(signal["voice_style"], "conversational")
+        self.assertTrue(has_interaction_signal(signal))
+
+    def test_negated_loneliness_does_not_trigger_concern(self):
+        signal = plan_turn_emotion("我现在已经不孤独了，最近过得还可以")
+
+        self.assertEqual(signal["user_mood"], "neutral")
+        self.assertEqual(signal["voice_style"], "conversational")
 
     def test_personal_compliment_and_shy_reply_selects_shy(self):
         signal = infer_interaction_emotion(
@@ -34,6 +74,7 @@ class InteractionEmotionTests(unittest.TestCase):
         )
         self.assertEqual(signal["mood"], "shy")
         self.assertGreaterEqual(signal["intensity"], 0.7)
+        self.assertEqual(signal["voice_style"], "bashful")
 
     def test_ability_compliment_selects_happy_when_reply_accepts_it(self):
         signal = infer_interaction_emotion(
@@ -146,6 +187,7 @@ class EmotionTransitionTests(unittest.TestCase):
         )
         self.assertEqual(updated["mood"], "neutral")
         self.assertEqual(updated["modifier"], "worried")
+        self.assertEqual(updated["voice_style"], "concerned")
         self.assertEqual(updated["user_mood"], "sad")
 
     def test_user_sadness_clears_old_happiness_before_comforting(self):
@@ -156,6 +198,86 @@ class EmotionTransitionTests(unittest.TestCase):
         )
         self.assertEqual(updated["mood"], "neutral")
         self.assertEqual(updated["modifier"], "worried")
+
+
+class ProactiveEmotionTests(unittest.TestCase):
+    def test_concerned_proactive_message_sets_expression_and_voice(self):
+        signal = plan_proactive_emotion(
+            "你今天还好吗？之前你很难过，我有点担心。",
+            {"top_event": None, "idle_score": 0.3},
+            emotion_state(),
+            {"familiarity": 50},
+        )
+
+        self.assertEqual(signal["modifier"], "worried")
+        self.assertEqual(signal["voice_style"], "concerned")
+        self.assertEqual(signal["source"], "proactive")
+
+    def test_happy_event_gives_proactive_message_cheerful_voice(self):
+        signal = plan_proactive_emotion(
+            "有个好消息想告诉你。",
+            {
+                "top_event": {
+                    "emotion": "happy",
+                    "user_emotion": "happy",
+                }
+            },
+            emotion_state(),
+        )
+
+        self.assertEqual(signal["mood"], "happy")
+        self.assertEqual(signal["voice_style"], "cheerful")
+
+    def test_idle_contact_uses_warm_voice_without_forcing_a_mood(self):
+        signal = plan_proactive_emotion(
+            "好久没聊了，有空吗？",
+            {"top_event": None, "idle_score": 0.5},
+            emotion_state(),
+            {"familiarity": 60},
+        )
+
+        self.assertEqual(signal["mood"], "neutral")
+        self.assertEqual(signal["voice_style"], "warm")
+
+
+class GreetingEmotionTests(unittest.TestCase):
+    def test_familiar_neutral_greeting_uses_warm_voice(self):
+        signal = plan_greeting_emotion(
+            "啊，你来了。今天过得怎么样？",
+            emotion_state(),
+            {"affection": 50, "familiarity": 40},
+        )
+
+        self.assertEqual(signal["mood"], "neutral")
+        self.assertEqual(signal["voice_style"], "warm")
+        self.assertEqual(signal["source"], "greeting")
+
+    def test_existing_happy_mood_gives_greeting_cheerful_voice(self):
+        signal = plan_greeting_emotion(
+            "你来了。",
+            emotion_state("happy", 0.7),
+            {"affection": 50, "familiarity": 40},
+        )
+
+        self.assertEqual(signal["voice_style"], "cheerful")
+
+    def test_concerned_greeting_sets_worried_expression(self):
+        signal = plan_greeting_emotion(
+            "你还好吗？别太勉强自己。",
+            emotion_state(),
+            {"affection": 50, "familiarity": 40},
+        )
+
+        self.assertEqual(signal["modifier"], "worried")
+        self.assertEqual(signal["voice_style"], "concerned")
+
+    def test_startup_greeting_does_not_consume_energy(self):
+        state = emotion_state()
+        signal = plan_greeting_emotion("你来了。", state, {"familiarity": 40})
+
+        update_emotion(state, interaction=signal, consume_energy=False)
+
+        self.assertEqual(state["energy"], 80)
 
 
 if __name__ == "__main__":

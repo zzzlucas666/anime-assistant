@@ -17,6 +17,31 @@ import traceback
 EVENT_PREFIX = "MIO_TTS_EVENT\t"
 
 
+def force_all_japanese_segments(lang_segmenter):
+    """让 ``all_ja`` 真正把拉丁字母片段也交给日文前端。
+
+    GPT-SoVITS 的 LangSegmenter 会在应用默认语言之前优先把纯英文片段
+    标记成 ``en``。这会延迟导入 g2p_en，并在离线环境中尝试下载 NLTK
+    cmudict。Mio 的输出本来就是日语；交给 pyopenjtalk 处理拉丁字母既能
+    保留名称，又不会让一次英文歌名使整条语音失败。
+    """
+    if getattr(lang_segmenter, "_mio_all_ja_forced", False):
+        return
+
+    original_get_texts = lang_segmenter.getTexts
+
+    def get_texts(text, default_lang=""):
+        segments = original_get_texts(text, default_lang)
+        if default_lang == "ja":
+            for segment in segments:
+                if isinstance(segment, dict):
+                    segment["lang"] = "ja"
+        return segments
+
+    lang_segmenter.getTexts = staticmethod(get_texts)
+    lang_segmenter._mio_all_ja_forced = True
+
+
 def emit(event_type, **payload):
     print(
         EVENT_PREFIX + json.dumps({"type": event_type, **payload}, ensure_ascii=False),
@@ -43,6 +68,7 @@ def main():
     os.chdir(repo_path)
 
     try:
+        emit("status", stage="imports", message="正在加载 GPT-SoVITS 推理依赖")
         import jieba
         import jieba.posseg
         import numpy as np
@@ -64,7 +90,11 @@ def main():
         torchaudio.load = load_wav_without_torchcodec
 
         from GPT_SoVITS.TTS_infer_pack.TTS import TTS, TTS_Config
+        from text.LangSegmenter import LangSegmenter
 
+        force_all_japanese_segments(LangSegmenter)
+
+        emit("status", stage="references", message="正在验证 Mio 情绪参考音频")
         references = json.loads(args.references)
         if not isinstance(references, dict) or "neutral" not in references:
             raise ValueError("GPT-SoVITS references must include neutral")
@@ -76,6 +106,7 @@ def main():
             if not audio_path.is_file() or not prompt:
                 raise FileNotFoundError(f"Invalid {mood} reference: {audio_path}")
 
+        emit("status", stage="model", message="正在加载 Mio GPT 与 SoVITS 权重")
         config = TTS_Config(
             {
                 "custom": {
@@ -129,7 +160,13 @@ def main():
 
         try:
             mood = str(request.get("mood", "neutral")).strip().lower()
-            reference = references.get(mood, references["neutral"])
+            voice_style = str(
+                request.get("voice_style", "conversational")
+            ).strip().lower()
+            reference = references.get(
+                voice_style,
+                references.get(mood, references["neutral"]),
+            )
             speed = max(0.5, min(2.0, float(request.get("speed_scale", 1.0))))
             volume = max(0.0, min(2.0, float(request.get("volume_scale", 1.0))))
             synthesis_request = {
@@ -166,6 +203,7 @@ def main():
                 id=request_id,
                 path=str(output_path),
                 mood=mood,
+                voice_style=voice_style,
                 bytes=output_path.stat().st_size,
             )
         except Exception as exc:

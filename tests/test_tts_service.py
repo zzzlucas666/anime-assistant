@@ -8,6 +8,8 @@ import wave
 
 from tts_service import (
     AivisSpeechError,
+    MioStyleBertClient,
+    MioStyleBertError,
     SpeechSynthesisService,
     build_mouth_envelope,
     combine_speech_audio,
@@ -15,6 +17,7 @@ from tts_service import (
     prepare_spoken_text,
     split_sentences,
 )
+from tts_gpt_sovits_worker import force_all_japanese_segments
 
 
 def make_test_wav(sample_rate=8000, duration=0.3):
@@ -33,6 +36,81 @@ def make_test_wav(sample_rate=8000, duration=0.3):
 
 
 class TTSServiceTests(unittest.TestCase):
+    def test_all_ja_forces_latin_names_through_japanese_frontend(self):
+        class FakeLangSegmenter:
+            @staticmethod
+            def getTexts(_text, _default_lang=""):
+                return [
+                    {"lang": "ja", "text": "最近は"},
+                    {"lang": "en", "text": "Radiohead"},
+                ]
+
+        force_all_japanese_segments(FakeLangSegmenter)
+
+        segments = FakeLangSegmenter.getTexts("最近はRadiohead", "ja")
+
+        self.assertEqual([item["lang"] for item in segments], ["ja", "ja"])
+
+    def test_local_model_prewarm_finishes_before_followup_callback(self):
+        trace = []
+
+        class FakeLocalClient:
+            supports_prewarm = True
+            last_error = ""
+
+            def is_available(self):
+                trace.append("model-ready")
+                return True
+
+        service = SpeechSynthesisService.__new__(SpeechSynthesisService)
+        service.client = FakeLocalClient()
+        service._stop_event = threading.Event()
+        service._jobs = queue.Queue()
+        service.on_status = lambda status: trace.append(f"status:{status}")
+
+        self.assertTrue(service.prewarm(lambda: trace.append("semantic-warmup")))
+        service._jobs.put(None)
+        service._run()
+
+        self.assertEqual(
+            trace,
+            [
+                "status:loading",
+                "model-ready",
+                "status:ready",
+                "semantic-warmup",
+            ],
+        )
+
+    def test_failed_local_prewarm_still_releases_followup_callback(self):
+        trace = []
+
+        class UnavailableLocalClient:
+            supports_prewarm = True
+            last_error = "startup failed"
+
+            def is_available(self):
+                return False
+
+        service = SpeechSynthesisService.__new__(SpeechSynthesisService)
+        service.client = UnavailableLocalClient()
+        service._stop_event = threading.Event()
+        service._jobs = queue.Queue()
+        service.on_status = lambda status: trace.append(status)
+
+        self.assertTrue(service.prewarm(lambda: trace.append("semantic-warmup")))
+        service._jobs.put(None)
+        service._run()
+
+        self.assertEqual(trace, ["loading", "error", "semantic-warmup"])
+
+    def test_local_worker_timeout_identifies_startup_phase(self):
+        client = MioStyleBertClient.__new__(MioStyleBertClient)
+        client._events = queue.Queue()
+
+        with self.assertRaisesRegex(MioStyleBertError, "startup timed out"):
+            client._wait_for_event(None, 0.01, phase="startup")
+
     def test_stage_direction_is_not_spoken(self):
         self.assertEqual(
             prepare_spoken_text("（轻轻点头）嗯，今天也一起练习吧。"),
@@ -175,6 +253,39 @@ class TTSServiceTests(unittest.TestCase):
 
         self.assertEqual(client.moods, ["shy"])
 
+    def test_voice_style_is_forwarded_independently_from_mood(self):
+        class VoiceStyleClient:
+            supports_mood_reference = True
+            supports_voice_style = True
+
+            def __init__(self):
+                self.calls = []
+
+            def synthesize(
+                self,
+                _text,
+                *_args,
+                mood="neutral",
+                voice_style="conversational",
+            ):
+                self.calls.append((mood, voice_style))
+                return make_test_wav(duration=0.1)
+
+        service = SpeechSynthesisService.__new__(SpeechSynthesisService)
+        service.config = {"tts_speed_scale": 1.0, "tts_volume_scale": 1.0}
+        service._stop_event = threading.Event()
+        client = VoiceStyleClient()
+
+        service._synthesize_sentences(
+            client,
+            ["大丈夫。"],
+            0,
+            "happy",
+            voice_style="concerned",
+        )
+
+        self.assertEqual(client.calls, [("happy", "concerned")])
+
     def test_subtle_mood_uses_neutral_reference_and_fatigue_can_override(self):
         self.assertEqual(
             SpeechSynthesisService._effective_mood("happy", 0.2, "none", 0.0),
@@ -190,6 +301,26 @@ class TTSServiceTests(unittest.TestCase):
         )
         self.assertLess(
             SpeechSynthesisService._emotion_speed_multiplier("neutral", 0.0, "worried", 0.5),
+            1.0,
+        )
+
+    def test_explicit_voice_style_replaces_base_mood_for_gpt_sovits(self):
+        self.assertEqual(
+            SpeechSynthesisService._effective_voice_style(
+                "happy", 0.8, "none", 0.0, "concerned"
+            ),
+            "concerned",
+        )
+        self.assertEqual(
+            SpeechSynthesisService._effective_voice_style(
+                "happy", 0.8, "none", 0.8, "cheerful"
+            ),
+            "tired",
+        )
+        self.assertLess(
+            SpeechSynthesisService._emotion_speed_multiplier(
+                "happy", 0.8, "none", 0.0, "concerned", 0.8
+            ),
             1.0,
         )
 
@@ -236,6 +367,93 @@ class TTSServiceTests(unittest.TestCase):
         self.assertEqual(len(ready), 1)
         self.assertEqual(ready[0].spoken_text, "第一句。第二句。")
         self.assertEqual(errors, [])
+
+    def test_local_backend_restarts_once_after_transient_synthesis_failure(self):
+        class FlakyLocalClient:
+            endpoint = "local GPT-SoVITS"
+            backend_name = "mio_gpt_sovits_v2proplus"
+            supports_voice_style = True
+            last_error = ""
+
+            def __init__(self):
+                self.calls = 0
+                self.closes = 0
+
+            def is_available(self):
+                return True
+
+            def synthesize(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("worker pipe lost")
+                return make_test_wav(duration=0.1)
+
+            def close(self):
+                self.closes += 1
+
+        client = FlakyLocalClient()
+        ready = []
+        errors = []
+        service = SpeechSynthesisService.__new__(SpeechSynthesisService)
+        service.config = {"aivis_max_chars_per_request": 56}
+        service.client = client
+        service.fallback_client = None
+        service.translator = None
+        service.local_retry_attempts = 1
+        service.on_audio_ready = ready.append
+        service.on_error = errors.append
+        service._stop_event = threading.Event()
+        service._jobs = queue.Queue()
+        service._jobs.put(("一度だけ再試行する。", "neutral"))
+        service._jobs.put(None)
+
+        service._run()
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(client.closes, 1)
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(errors, [])
+
+    def test_final_error_keeps_primary_and_fallback_causes(self):
+        class BrokenPrimary:
+            endpoint = "local GPT-SoVITS"
+            backend_name = "mio_gpt_sovits_v2proplus"
+            supports_voice_style = True
+            last_error = ""
+
+            def is_available(self):
+                return True
+
+            def synthesize(self, *_args, **_kwargs):
+                raise RuntimeError("primary text frontend failed")
+
+        class UnavailableFallback:
+            endpoint = "http://127.0.0.1:10101"
+            backend_name = "aivis"
+            last_error = "fallback server is not running"
+
+            def is_available(self):
+                return False
+
+        errors = []
+        service = SpeechSynthesisService.__new__(SpeechSynthesisService)
+        service.config = {"aivis_max_chars_per_request": 56}
+        service.client = BrokenPrimary()
+        service.fallback_client = UnavailableFallback()
+        service.translator = None
+        service.local_retry_attempts = 0
+        service.on_audio_ready = lambda _audio: None
+        service.on_error = errors.append
+        service._stop_event = threading.Event()
+        service._jobs = queue.Queue()
+        service._jobs.put(("原因を残す。", "neutral"))
+        service._jobs.put(None)
+
+        service._run()
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("primary text frontend failed", errors[0])
+        self.assertIn("fallback server is not running", errors[0])
 
 
 if __name__ == "__main__":

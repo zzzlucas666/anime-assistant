@@ -1,4 +1,4 @@
-"""Generate fixed GPT-SoVITS emotion samples from the active Mio backend."""
+"""Generate fixed GPT-SoVITS voice-style samples from the active Mio backend."""
 
 from __future__ import annotations
 
@@ -12,16 +12,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from config_loader import load_config
-from tts_service import MioGPTSoVITSClient
+from tts_service import MioGPTSoVITSClient, SpeechSynthesisService
 
 
-SAMPLES = {
-    "neutral": "おかえり。今日はどんな一日だった？",
-    "happy": "やった！今日はすごく調子がいいぞ。一緒に練習しよう！",
-    "shy": "あ、あんまりじっと見ないでよ。恥ずかしいから……。",
-    "sad": "今日はうまく弾けなかった。もう少し練習しないとだめだな……。",
-    "tired": "今日はちょっと疲れたな。少しだけ休んでもいい？",
-}
+SAMPLES = (
+    ("conversational", "neutral", "おかえり。今日はどんな一日だった？"),
+    ("thoughtful", "neutral", "そうだな……少しずつ試してみるのがいいと思う。"),
+    ("warm", "happy", "ありがとう。そう言ってもらえると、やっぱり嬉しいよ。"),
+    ("cheerful", "happy", "やった。今日はすごく調子がいいぞ。"),
+    ("bashful", "shy", "そ、そんなふうに言われると、ちょっと恥ずかしいよ。"),
+    ("embarrassed", "shy", "もう、急にそんなこと言うなよ。顔が熱くなるだろ。"),
+    ("concerned", "neutral", "大丈夫か？無理に元気なふりをしなくてもいいんだぞ。"),
+    ("reassuring", "neutral", "焦らなくていいよ。少し休んでから、また一緒に考えよう。"),
+    ("mild_annoyed", "neutral", "もう、からかうなよ。そんなこと言ってもだめだからな。"),
+)
 
 
 def main():
@@ -38,14 +42,27 @@ def main():
     client = MioGPTSoVITSClient(config)
     results = []
     try:
-        for mood, text in SAMPLES.items():
+        for index, (voice_style, mood, text) in enumerate(SAMPLES, start=1):
+            print(
+                f"[{index}/{len(SAMPLES)}] 正在生成 {voice_style}...",
+                flush=True,
+            )
+            speed_multiplier = SpeechSynthesisService._emotion_speed_multiplier(
+                mood,
+                0.7,
+                "none",
+                0.0,
+                voice_style,
+                0.75,
+            )
             wav_data = client.synthesize(
                 text,
-                speed_scale=config.get("tts_speed_scale", 1.0),
+                speed_scale=config.get("tts_speed_scale", 1.0) * speed_multiplier,
                 volume_scale=config.get("tts_volume_scale", 1.0),
                 mood=mood,
+                voice_style=voice_style,
             )
-            output_path = output_dir / f"mio_e15_{mood}.wav"
+            output_path = output_dir / f"mio_e15_{voice_style}.wav"
             output_path.write_bytes(wav_data)
             with wave.open(str(output_path), "rb") as wav_file:
                 sample_rate = wav_file.getframerate()
@@ -53,12 +70,19 @@ def main():
             results.append(
                 {
                     "mood": mood,
+                    "voice_style": voice_style,
+                    "speed_multiplier": round(speed_multiplier, 3),
                     "text": text,
                     "output": str(output_path),
                     "sample_rate": sample_rate,
                     "duration_seconds": round(duration, 3),
                     "bytes": len(wav_data),
                 }
+            )
+            print(
+                f"[{index}/{len(SAMPLES)}] 已完成 {voice_style}: "
+                f"{duration:.2f}s",
+                flush=True,
             )
     finally:
         client.close()

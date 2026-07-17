@@ -62,6 +62,11 @@ def build_turn_emotion_hint(turn_emotion):
         "anxious": "紧张或担心",
         "angry": "生气",
         "embarrassed": "尴尬",
+        "lonely": "孤单，希望有人陪伴",
+        "bored": "无聊或提不起兴趣",
+        "stressed": "有压力或忙得疲惫",
+        "tired": "疲惫",
+        "disappointed": "失望或受挫",
     }
     mood_labels = {
         "neutral": "保持平静",
@@ -77,8 +82,30 @@ def build_turn_emotion_hint(turn_emotion):
         "surprised": "短暂惊讶",
         "annoyed": "有一点无奈或轻微不满",
     }
+    voice_style_labels = {
+        "conversational": "像日常聊天一样自然",
+        "thoughtful": "稍作思考，平静地给出想法",
+        "warm": "温暖亲近，但不要过分甜腻",
+        "cheerful": "轻快高兴，但不要亢奋",
+        "excited": "明显兴奋，语气更有活力",
+        "bashful": "有点不好意思，仍能自然说完整句子",
+        "embarrassed": "明显害羞和慌乱，但不要表演过度",
+        "concerned": "认真关心对方，先共情再回应",
+        "reassuring": "沉稳安慰，避免说教",
+        "curious": "带着真实好奇继续追问",
+        "surprised": "先短暂惊讶，再正常回应",
+        "mild_annoyed": "轻微无奈或嗔怪，不真正伤人",
+        "serious": "认真克制，不使用轻快玩笑语气",
+        "disappointed": "有些失落，语气收敛",
+        "tired": "略显疲惫，句子简短",
+    }
     try:
-        intensity = float(turn_emotion.get("intensity", 0.0))
+        intensity = max(
+            float(turn_emotion.get("intensity", 0.0) or 0.0),
+            float(turn_emotion.get("modifier_strength", 0.0) or 0.0),
+            float(turn_emotion.get("voice_style_strength", 0.0) or 0.0),
+            float(turn_emotion.get("user_intensity", 0.0) or 0.0),
+        )
     except (TypeError, ValueError):
         intensity = 0.0
     if intensity >= 0.75:
@@ -87,10 +114,29 @@ def build_turn_emotion_hint(turn_emotion):
         intensity_hint = "反应自然但克制"
     else:
         intensity_hint = "只需要很轻微地表现"
+    if turn_emotion.get("source") == "greeting":
+        return (
+            "这是程序启动后的见面问候，用户还没有发来新的消息；"
+            f"Mio 当前反应：{mood_labels.get(turn_emotion.get('mood'), '保持平静')}；"
+            f"短暂反应：{modifier_labels.get(turn_emotion.get('modifier'), '没有额外反应')}；"
+            f"本句说话方式：{voice_style_labels.get(turn_emotion.get('voice_style'), '像日常聊天一样自然')}；"
+            f"{intensity_hint}。\n"
+            "只自然打招呼，不要假装正在回答用户，也不要说出标签、分数或系统判断。"
+        )
+    if turn_emotion.get("source") == "proactive":
+        return (
+            "这是 Mio 主动开口，用户这一轮还没有表达新的情绪；"
+            f"Mio 当前反应：{mood_labels.get(turn_emotion.get('mood'), '保持平静')}；"
+            f"短暂反应：{modifier_labels.get(turn_emotion.get('modifier'), '没有额外反应')}；"
+            f"本句说话方式：{voice_style_labels.get(turn_emotion.get('voice_style'), '像日常聊天一样自然')}；"
+            f"{intensity_hint}。\n"
+            "自然地开启话题，不要假装用户刚刚说过一句话，也不要说出标签、分数或系统判断。"
+        )
     return (
         f"用户此刻：{user_labels.get(turn_emotion.get('user_mood'), '没有明确情绪')}；"
         f"Mio 本轮反应：{mood_labels.get(turn_emotion.get('mood'), '保持平静')}；"
         f"短暂反应：{modifier_labels.get(turn_emotion.get('modifier'), '没有额外反应')}；"
+        f"本句说话方式：{voice_style_labels.get(turn_emotion.get('voice_style'), '像日常聊天一样自然')}；"
         f"{intensity_hint}。\n"
         "先接住用户此刻的感受，再自然回答；不要说出任何标签、分数或系统判断。"
     )
@@ -143,6 +189,7 @@ def build_system_prompt(context, query_text=None):
 心情：{emotion['mood']}
 心情强度：{emotion.get('mood_strength', 0.0)}
 短暂反应：{emotion.get('modifier', 'none')}
+本句说话方式：{emotion.get('voice_style', 'conversational')}
 疲劳程度：{emotion.get('fatigue_strength', 0.0)}
 精力：{emotion['energy']}
 
@@ -415,6 +462,7 @@ def generate_greeting(
     context
 ):
     persona = load_persona()
+    greeting_emotion_hint = build_turn_emotion_hint(context.get("turn_emotion"))
 
     client = create_ai_client(
         context["config"]["api_key"],
@@ -432,6 +480,9 @@ def generate_greeting(
 心情：{context['emotion']['mood']}
 好感度：{context['relationship']['affection']}
 精力：{context['emotion']['energy']}
+
+本次问候的表达要求：
+{greeting_emotion_hint}
 
 用户资料：
 

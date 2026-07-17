@@ -69,7 +69,10 @@ class ConfigurationAndPathTests(unittest.TestCase):
             DEFAULT_CONFIG["mio_tts_model"],
         )
         self.assertTrue(loaded["mio_gpt_sovits_gpt_weights"].endswith("e15.ckpt"))
+        self.assertEqual(loaded["mio_gpt_sovits_startup_timeout_seconds"], 180.0)
         self.assertIn("shy", loaded["mio_gpt_sovits_references"])
+        self.assertIn("conversational", loaded["mio_gpt_sovits_references"])
+        self.assertIn("concerned", loaded["mio_gpt_sovits_references"])
 
     def test_gpt_sovits_backend_is_preserved_by_config_normalization(self):
         configured = {

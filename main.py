@@ -1,4 +1,5 @@
 """Anime Assistant main module"""
+import copy
 import threading
 
 from prompt_toolkit import PromptSession
@@ -8,7 +9,12 @@ from context_manager import ContextManager
 from config_loader import load_config
 from ai.chat import generate_greeting
 from memory_manager import load_memory
-from emotion_manager import load_emotion
+from emotion_manager import (
+    load_emotion,
+    plan_greeting_emotion,
+    save_emotion,
+    update_emotion,
+)
 from profile_manager import load_profile
 from relationship_manager import load_relationship
 from orchestrator import ConversationOrchestrator
@@ -43,15 +49,37 @@ def main():
     )
 
     background_thread = threading.Thread(target=initiative_engine.run_loop, daemon=True)
-    background_thread.start()
+    with state_lock:
+        emotion_snapshot = copy.deepcopy(emotion)
+        relationship_snapshot = copy.deepcopy(relationship)
+        context_snapshot = copy.deepcopy(context.get_context())
+    context_snapshot["turn_emotion"] = plan_greeting_emotion(
+        "",
+        emotion_snapshot,
+        relationship_snapshot,
+    )
+    greeting = generate_greeting(context_snapshot)
+    greeting_emotion = plan_greeting_emotion(
+        greeting,
+        emotion_snapshot,
+        relationship_snapshot,
+    )
+    with state_lock:
+        emotion = update_emotion(
+            emotion,
+            interaction=greeting_emotion,
+            consume_energy=False,
+        )
+        save_emotion(emotion)
+        context.update(emotion, profile, relationship)
 
-    greeting = generate_greeting(context.get_context())
     print("Anime Assistant Started")
     print(f"Anime {config['assistant_name']} starting...")
     print("输入 exit 退出聊天\n")
     print("Anime Assistant:")
     print(greeting)
     print()
+    background_thread.start()
 
     # PromptSession + patch_stdout 是 prompt_toolkit 提供的标准解法：
     # 当用户正在 "You: " 这一行输入时，后台线程（InitiativeEngine）如果

@@ -281,16 +281,23 @@ class ConversationOrchestrator:
 
         # 即时情绪不再等待“长期事件提取”。这一步只做本地轻量判断，
         # 能让本轮状态、Live2D 和 TTS 在回复展示时就保持一致。
-        interaction_emotion = (
-            infer_interaction_emotion(
+        if transient_fallback:
+            interaction_emotion = {
+                "mood": "neutral",
+                "intensity": 0.0,
+                "reason": "skipped",
+            }
+        elif router_reply:
+            # 精确查表回复没有模型措辞可供二次校准，但仍应使用本轮本地
+            # 计划，避免沿用上一句话的害羞、担心等语气。
+            interaction_emotion = dict(prepared.get("turn_emotion") or {})
+        else:
+            interaction_emotion = infer_interaction_emotion(
                 prepared.get("emotion_message", clean_message),
                 raw_reply or reply,
                 relationship=self.relationship,
                 planned=prepared.get("turn_emotion"),
             )
-            if not router_reply and not transient_fallback
-            else {"mood": "neutral", "intensity": 0.0, "reason": "skipped"}
-        )
         immediate_emotion_applied = has_interaction_signal(interaction_emotion)
 
         with self.lock:
@@ -366,21 +373,25 @@ class ConversationOrchestrator:
             )
             event_duration = time.perf_counter() - event_started_at
 
+        state_changed = False
         with self.lock:
             # 即时信号已在 finalize_turn 应用时，不再让稍后返回的长期事件
             # 标签覆盖它，也避免同一轮重复消耗精力。
             if not task.get("immediate_emotion_applied", False):
                 self.emotion = update_emotion(self.emotion, event)
                 save_emotion(self.emotion)
+                state_changed = True
 
             if not router_reply:
                 save_event(event)
+                relationship_before = copy.deepcopy(self.relationship)
                 self.relationship = update_relationship(self.relationship, event)
                 save_relationship(self.relationship)
+                state_changed = state_changed or self.relationship != relationship_before
 
             self.context.update(self.emotion, self.profile, self.relationship)
 
-        if self.on_state_updated:
+        if state_changed and self.on_state_updated:
             try:
                 self.on_state_updated()
             except Exception as e:

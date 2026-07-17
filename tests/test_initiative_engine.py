@@ -36,6 +36,7 @@ class InitiativeEngineCompatibilityTests(unittest.TestCase):
             patch.object(engine, "_compute_signals", return_value=signals),
             patch("initiative_engine.generate_proactive_message", return_value="generated") as generate,
             patch("initiative_engine.mark_event_notified") as mark_notified,
+            patch("initiative_engine.save_emotion"),
             patch.object(engine, "_record_message", return_value=[]) as record_message,
             patch("initiative_engine.summarize_pending_if_ready", return_value=False),
         ):
@@ -82,6 +83,7 @@ class InitiativeEngineCompatibilityTests(unittest.TestCase):
             patch("initiative_engine.load_last_interaction_time", return_value=interaction_time),
             patch.object(engine, "_compute_signals", return_value=signals),
             patch("initiative_engine.generate_proactive_message", side_effect=generate_while_unlocked),
+            patch("initiative_engine.save_emotion"),
             patch.object(engine, "_record_message", return_value=[]) as record_message,
             patch("initiative_engine.summarize_pending_if_ready", return_value=False),
         ):
@@ -89,6 +91,68 @@ class InitiativeEngineCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(message, "generated")
         record_message.assert_called_once_with("generated")
+
+    def test_proactive_concern_is_committed_before_message_delivery(self):
+        context = Mock()
+        context.get_context.return_value = {
+            "config": {"api_key": "unused", "model": "unused"},
+            "profile": {},
+            "emotion": {"mood": "neutral", "energy": 80},
+            "relationship": {"familiarity": 50},
+        }
+        emotion = {"mood": "neutral", "energy": 80}
+        engine = InitiativeEngine(
+            config={"api_key": "unused", "model": "unused"},
+            context=context,
+            conversation_history=[],
+            emotion=emotion,
+            profile={},
+            relationship={"familiarity": 50},
+            lock=threading.Lock(),
+        )
+        signals = {
+            "event_score": 0.9,
+            "emotion_score": 0.0,
+            "idle_score": 0.3,
+            "top_event": {
+                "id": "event-1",
+                "event": "用户之前说自己很难过",
+                "importance": 0.9,
+                "emotion": "worried",
+                "user_emotion": "sad",
+            },
+            "idle_minutes": 60,
+            "mood": "neutral",
+            "energy": 80,
+            "familiarity_pct": 50,
+        }
+
+        def generate(context_snapshot, _reason_hint):
+            self.assertEqual(
+                context_snapshot["turn_emotion"]["voice_style"],
+                "concerned",
+            )
+            return "你今天还好吗？我有点担心。"
+
+        def record_after_emotion(_message):
+            self.assertEqual(emotion["modifier"], "worried")
+            self.assertEqual(emotion["voice_style"], "concerned")
+            return []
+
+        with (
+            patch("initiative_engine.can_trigger_proactive", return_value=True),
+            patch("initiative_engine.load_last_interaction_time", return_value=None),
+            patch.object(engine, "_compute_signals", return_value=signals),
+            patch("initiative_engine.generate_proactive_message", side_effect=generate),
+            patch("initiative_engine.mark_event_notified"),
+            patch("initiative_engine.save_emotion"),
+            patch.object(engine, "_record_message", side_effect=record_after_emotion),
+            patch("initiative_engine.summarize_pending_if_ready", return_value=False),
+        ):
+            message = engine.check_and_trigger()
+
+        self.assertEqual(message, "你今天还好吗？我有点担心。")
+        context.update.assert_called()
 
     def test_user_interaction_during_generation_discards_stale_message(self):
         context = Mock()

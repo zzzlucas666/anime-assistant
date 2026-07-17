@@ -39,6 +39,7 @@ import sys
 import html
 import threading
 import datetime
+import copy
 from collections import deque
 
 from PySide6.QtCore import (
@@ -61,7 +62,12 @@ from config_loader import (
 )
 from ai.chat import generate_greeting
 from memory_manager import load_memory
-from emotion_manager import load_emotion
+from emotion_manager import (
+    load_emotion,
+    plan_greeting_emotion,
+    save_emotion,
+    update_emotion,
+)
 from profile_manager import load_profile
 from relationship_manager import load_relationship
 from orchestrator import ConversationOrchestrator
@@ -254,6 +260,7 @@ class SpeechBridge(QObject):
 
     audio_ready = Signal(object)
     error_occurred = Signal(str)
+    status_changed = Signal(str)
 
 
 class SpeechPlaybackController(QObject):
@@ -567,6 +574,7 @@ class MainWindow(QMainWindow):
         self.speech_bridge = SpeechBridge(self)
         self.speech_bridge.audio_ready.connect(self._on_speech_audio_ready)
         self.speech_bridge.error_occurred.connect(self._on_speech_error)
+        self.speech_bridge.status_changed.connect(self._on_speech_status)
         self.speech_playback = SpeechPlaybackController(
             self.character_controller, self
         )
@@ -576,11 +584,18 @@ class MainWindow(QMainWindow):
                 self.config,
                 on_audio_ready=self.speech_bridge.audio_ready.emit,
                 on_error=self.speech_bridge.error_occurred.emit,
+                on_status=self.speech_bridge.status_changed.emit,
             )
+        prewarm_started = False
+        if self.speech_service is not None:
+            prewarm_started = self.speech_service.prewarm(
+                on_complete=warmup_model_async
+            )
+        if not prewarm_started:
+            warmup_model_async()
         self._start_timers()
         self._start_background_thread()
         self._show_greeting()
-        self._update_status_bar()
 
     # ------------------------------------------------------------------
     # 界面搭建
@@ -614,11 +629,19 @@ class MainWindow(QMainWindow):
         self.status_energy_label = QLabel()
         self.status_affection_label = QLabel()
         self.status_familiarity_label = QLabel()
+        self.status_voice_label = QLabel()
 
-        for lbl in (
+        status_labels = [
             self.status_mood_label, self.status_energy_label,
             self.status_affection_label, self.status_familiarity_label
-        ):
+        ]
+        if self.config.get("tts_enabled", False):
+            self.status_voice_label.setText(
+                f'<span style="color:{SYSTEM_COLOR};">🔊 语音待加载</span>'
+            )
+            status_labels.append(self.status_voice_label)
+
+        for lbl in status_labels:
             lbl.setFont(QFont(FONT_FAMILY, 10))
             lbl.setTextFormat(Qt.RichText)
             status_row.addWidget(lbl)
@@ -861,9 +884,32 @@ class MainWindow(QMainWindow):
             )
 
     def _show_greeting(self):
-        greeting = generate_greeting(self.context.get_context())
+        with self.state_lock:
+            emotion_snapshot = copy.deepcopy(self.emotion)
+            relationship_snapshot = copy.deepcopy(self.relationship)
+            context_snapshot = copy.deepcopy(self.context.get_context())
+        context_snapshot["turn_emotion"] = plan_greeting_emotion(
+            "",
+            emotion_snapshot,
+            relationship_snapshot,
+        )
+        greeting = generate_greeting(context_snapshot)
+        greeting_emotion = plan_greeting_emotion(
+            greeting,
+            emotion_snapshot,
+            relationship_snapshot,
+        )
+        with self.state_lock:
+            self.emotion = update_emotion(
+                self.emotion,
+                interaction=greeting_emotion,
+                consume_energy=False,
+            )
+            save_emotion(self.emotion)
+            self.context.update(self.emotion, self.context.profile, self.relationship)
         self.messages.append(self._new_message("system", f"{self.config.get('assistant_name', 'Mio')} 已启动"))
         self.messages.append(self._new_message("mio", greeting))
+        self._update_status_bar()
         self._render()
         self._speak_reply(greeting)
 
@@ -976,6 +1022,8 @@ class MainWindow(QMainWindow):
             emotion_strength=self.emotion.get("mood_strength", 1.0),
             modifier=self.emotion.get("modifier", "none"),
             fatigue_strength=self.emotion.get("fatigue_strength", 0.0),
+            voice_style=self.emotion.get("voice_style", "conversational"),
+            voice_style_strength=self.emotion.get("voice_style_strength", 0.4),
         ):
             self.character_controller.on_speech_preparing()
 
@@ -984,9 +1032,26 @@ class MainWindow(QMainWindow):
             return
         self.speech_playback.enqueue(audio)
 
+    def _on_speech_status(self, status):
+        if not hasattr(self, "status_voice_label"):
+            return
+        states = {
+            "loading": ("⏳", "语音模型加载中", USER_COLOR),
+            "ready": ("🔊", "语音就绪", MIO_COLOR),
+            "error": ("🔇", "语音暂不可用", ERROR_COLOR),
+        }
+        icon, text, color = states.get(
+            status,
+            ("🔊", "语音待加载", SYSTEM_COLOR),
+        )
+        self.status_voice_label.setText(
+            f'<span style="color:{color};">{icon} {text}</span>'
+        )
+
     def _on_speech_error(self, error_text):
         # TTS 是可选表现层：错误只进日志，不用系统气泡打断聊天。
         self.character_controller.on_speech_preparing_finished()
+        self._on_speech_status("error")
         logger.warning("语音暂不可用，已保留文字回复：%s", error_text)
 
     # ------------------------------------------------------------------
@@ -1078,7 +1143,6 @@ class MainWindow(QMainWindow):
 
 def main():
     config = load_config()
-    warmup_model_async()
     live2d_model_path = resolve_live2d_model_path(config.get("live2d_model_path"))
     # 下面 MainWindow 会再根据配置建立界面。把已验证的路径放回配置，
     # 避免无效路径重复记录两次警告。

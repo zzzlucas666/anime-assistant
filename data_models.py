@@ -12,8 +12,16 @@ ALLOWED_INTENTS = {"chat", "get_profile", "set_profile", "emotion_query"}
 ALLOWED_PROFILE_ACTIONS = {"add_like", "add_dislike", "set_name", "set_nickname", "none"}
 ALLOWED_MOODS = {"neutral", "happy", "shy", "sad", "tired"}
 ALLOWED_EVENT_EMOTIONS = {"neutral", "happy", "shy", "curious", "sad", "touched", "worried"}
-ALLOWED_USER_EMOTIONS = {"neutral", "happy", "sad", "anxious", "angry", "embarrassed"}
+ALLOWED_USER_EMOTIONS = {
+    "neutral", "happy", "sad", "anxious", "angry", "embarrassed",
+    "lonely", "bored", "stressed", "tired", "disappointed",
+}
 ALLOWED_EMOTION_MODIFIERS = {"none", "worried", "touched", "curious", "surprised", "annoyed"}
+ALLOWED_VOICE_STYLES = {
+    "conversational", "thoughtful", "warm", "cheerful", "excited",
+    "bashful", "embarrassed", "concerned", "reassuring", "curious",
+    "surprised", "mild_annoyed", "serious", "disappointed", "tired",
+}
 ALLOWED_EVENT_IMPACTS = {"increase_bond", "increase_affinity", "none", "positive", "negative", "talk"}
 ALLOWED_MESSAGE_ROLES = {"user", "assistant"}
 
@@ -187,6 +195,9 @@ def normalize_emotion(value):
     user_mood = _clean_string(value.get("user_mood"), "neutral")
     if user_mood not in ALLOWED_USER_EMOTIONS:
         user_mood = "neutral"
+    voice_style = _clean_string(value.get("voice_style"), "conversational")
+    if voice_style not in ALLOWED_VOICE_STYLES:
+        voice_style = "conversational"
     return {
         "mood": mood,
         "energy": _number(value.get("energy"), 80, 0.0, 100.0),
@@ -198,6 +209,10 @@ def normalize_emotion(value):
         "modifier": modifier,
         "modifier_strength": _number(value.get("modifier_strength"), 0.0, 0.0, 1.0),
         "modifier_turns_remaining": _integer(value.get("modifier_turns_remaining"), 0, 0, 10),
+        "voice_style": voice_style,
+        "voice_style_strength": _number(
+            value.get("voice_style_strength"), 0.4, 0.0, 1.0
+        ),
         "user_mood": user_mood,
         "user_mood_strength": _number(value.get("user_mood_strength"), 0.0, 0.0, 1.0),
         "user_mood_set_at": (

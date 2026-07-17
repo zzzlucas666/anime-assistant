@@ -37,6 +37,58 @@ class PreferenceRoutingTests(unittest.TestCase):
 
 
 class ConversationStylePromptTests(unittest.TestCase):
+    def test_proactive_emotion_hint_does_not_invent_current_user_input(self):
+        hint = chat.build_turn_emotion_hint(
+            {
+                "source": "proactive",
+                "mood": "neutral",
+                "modifier": "worried",
+                "modifier_strength": 0.7,
+                "voice_style": "concerned",
+                "voice_style_strength": 0.8,
+            }
+        )
+
+        self.assertIn("Mio 主动开口", hint)
+        self.assertIn("认真关心对方", hint)
+        self.assertIn("不要假装用户刚刚说过一句话", hint)
+
+    def test_greeting_prompt_receives_independent_voice_style(self):
+        client = Mock()
+        response = Mock()
+        response.choices = [Mock(message=Mock(content="啊，你来了。"))]
+        client.chat.completions.create.return_value = response
+        context = {
+            "config": {
+                "api_key": "unused",
+                "base_url": "https://example.invalid",
+                "model": "test-model",
+            },
+            "profile": {
+                "name": "",
+                "nickname": "",
+                "likes": [],
+                "dislikes": [],
+            },
+            "emotion": {"mood": "neutral", "energy": 80},
+            "relationship": {"affection": 50, "trust": 40, "familiarity": 40},
+            "turn_emotion": {
+                "source": "greeting",
+                "mood": "neutral",
+                "modifier": "none",
+                "voice_style": "warm",
+                "voice_style_strength": 0.6,
+            },
+        }
+
+        with patch("ai.chat.create_ai_client", return_value=client):
+            greeting = chat.generate_greeting(context)
+
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        self.assertEqual(greeting, "啊，你来了。")
+        self.assertIn("程序启动后的见面问候", prompt)
+        self.assertIn("温暖亲近", prompt)
+
     def test_prompt_requires_short_conversational_non_literary_replies(self):
         context = {
             "profile": {"name": "", "nickname": "", "likes": [], "dislikes": []},
