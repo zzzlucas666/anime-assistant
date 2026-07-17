@@ -20,6 +20,7 @@
     "tts_translate_to_japanese": true,
     "tts_speed_scale": 1.0,
     "tts_volume_scale": 1.0,
+    "mio_tts_retry_attempts": 1,
     "aivis_endpoint": "http://127.0.0.1:10101",
     "aivis_timeout_seconds": 60,
     "aivis_max_chars_per_request": 56,
@@ -49,6 +50,7 @@
     "mio_gpt_sovits_repo": "data/training_tools/GPT-SoVITS",
     "mio_gpt_sovits_gpt_weights": "data/mio_voice_dataset/gpt_sovits/v2proplus_v1/weights/gpt/mio_v2proplus_v1-e15.ckpt",
     "mio_gpt_sovits_sovits_weights": "data/mio_voice_dataset/gpt_sovits/v2proplus_v1/weights/sovits/mio_v2proplus_v1_e8_s768.pth",
+    "mio_gpt_sovits_startup_timeout_seconds": 180,
     "live2d_expression_map": {
         "happy": "",
         "sad": "",

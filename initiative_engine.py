@@ -38,6 +38,7 @@ from event_manager import get_unnotified_important_events, mark_event_notified
 from interaction_tracker import load_last_interaction_time, update_last_interaction_time
 from proactive_tracker import can_trigger_proactive, record_proactive_trigger
 from ai.chat import generate_proactive_message, get_user_display_name
+from emotion_manager import plan_proactive_emotion, save_emotion, update_emotion
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -239,9 +240,23 @@ class InitiativeEngine:
 
             reason_hint = self._build_reason_hint(signals)
             context_snapshot = copy.deepcopy(self.context.get_context())
+            emotion_snapshot = copy.deepcopy(self.emotion)
+            relationship_snapshot = copy.deepcopy(self.relationship)
+            context_snapshot["turn_emotion"] = plan_proactive_emotion(
+                "",
+                signals,
+                emotion_snapshot,
+                relationship_snapshot,
+            )
 
         # 慢 AI 请求必须在锁外。
         message = generate_proactive_message(context_snapshot, reason_hint)
+        proactive_emotion = plan_proactive_emotion(
+            message,
+            signals,
+            emotion_snapshot,
+            relationship_snapshot,
+        )
 
         with self.lock:
             if self._stop_flag.is_set():
@@ -266,6 +281,14 @@ class InitiativeEngine:
                 else:
                     logger.warning("待通知事件缺少 id，已跳过通知标记：%s", top_event.get("event", ""))
 
+            # 主动消息也必须在展示与 TTS 前提交本轮状态。update_emotion 原地
+            # 更新共享字典，因此 GUI、Live2D、ContextManager 会看到同一份结果。
+            self.emotion = update_emotion(
+                self.emotion,
+                interaction=proactive_emotion,
+            )
+            save_emotion(self.emotion)
+            self.context.update(self.emotion, self.profile, self.relationship)
             overflow = self._record_message(message)
 
         # 溢出历史先持久化到待处理队列，累计到批量阈值再调一次 AI。

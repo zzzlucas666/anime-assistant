@@ -3,7 +3,7 @@ import re
 
 from Storage_utils import safe_load_json, safe_save_json
 from app_paths import DATA_DIR
-from data_models import normalize_emotion
+from data_models import ALLOWED_VOICE_STYLES, normalize_emotion
 
 EMOTION_PATH = str(DATA_DIR / "emotion_state.json")
 
@@ -47,9 +47,30 @@ USER_SAD_MARKERS = (
     "我好难过", "我很难过", "我不开心", "我很伤心", "我想哭",
     "我好失落", "我很失落", "我心情不好", "今天很糟糕",
 )
+USER_LONELY_MARKERS = (
+    "孤单", "孤独", "寂寞", "空落落", "没人陪", "没人找我",
+    "没人和我聊天", "没人跟我聊天", "一个人好难受", "感觉很冷清",
+)
+USER_BORED_MARKERS = (
+    "好无聊", "很无聊", "挺无聊", "感到无聊", "觉得无聊",
+    "没意思", "没什么事做", "不知道做什么", "提不起兴趣",
+)
 USER_ANXIOUS_MARKERS = (
     "我好紧张", "我很紧张", "我好担心", "我很担心", "我害怕",
     "我好焦虑", "我很焦虑", "我不安", "我慌了",
+)
+USER_STRESSED_MARKERS = (
+    "压力很大", "压力好大", "压力太大", "忙不过来", "忙得喘不过气",
+    "最近很忙", "最近挺忙", "挺忙的", "太忙了", "事情好多",
+    "工作压得", "实习很累", "实习挺忙", "快撑不住",
+)
+USER_TIRED_MARKERS = (
+    "我好累", "我很累", "累死了", "累坏了", "身心疲惫",
+    "没睡好", "睡不够", "困死了", "精疲力尽",
+)
+USER_DISAPPOINTED_MARKERS = (
+    "我很失望", "我好失望", "太失望了", "失败了", "搞砸了",
+    "没考好", "不顺利", "被拒绝了", "白努力了",
 )
 USER_ANGRY_MARKERS = ("我生气", "我很生气", "气死我", "我好火大", "烦死了")
 USER_HAPPY_MARKERS = (
@@ -60,6 +81,10 @@ DIRECTED_NEGATIVE_MARKERS = ("讨厌你", "你真烦", "不想理你", "你让�
 ANNOYED_MARKERS = ("你真笨", "笨蛋", "逗你的", "开玩笑的")
 SURPRISE_MARKERS = ("没想到", "居然", "告诉你个秘密", "你猜怎么着", "我中奖了")
 QUESTION_MARKERS = ("为什么", "怎么会", "你觉得", "你知道", "真的吗", "是不是")
+ADVICE_MARKERS = (
+    "怎么办", "有什么办法", "有什么好办法", "有什么建议", "该怎么做",
+    "怎么调整", "要怎么改善", "能帮我想想", "要不要试试",
+)
 SHY_REPLY_MARKERS = (
     "害羞", "脸红", "红着脸", "移开视线", "低下头", "别这样说",
     "突然说什么", "让人不好意思", "不知道怎么办", "才不可爱", "哪有那么",
@@ -72,6 +97,30 @@ USER_SAD_PATTERN = re.compile(r"我(?:(?!你).){0,8}(?:难过|伤心|不开心|�
 USER_ANXIOUS_PATTERN = re.compile(r"我(?:(?!你).){0,8}(?:紧张|担心|害怕|焦虑|不安|慌)")
 USER_ANGRY_PATTERN = re.compile(r"我(?:(?!你).){0,8}(?:生气|火大|恼火)")
 USER_HAPPY_PATTERN = re.compile(r"我(?:(?!你).){0,8}(?:开心|高兴|成功了|通过了|做到了)")
+NEGATED_EMOTION_PATTERN = re.compile(
+    r"(?:不|没|没有|并不|不再)(?:是|觉得|感到)?(?:很|太|怎么|那么|特别|非常|有点)?"
+    r"(?:难过|伤心|失落|孤单|孤独|寂寞|无聊|紧张|担心|害怕|焦虑|生气|失望|疲惫|累)"
+)
+PROACTIVE_CONCERN_MARKERS = (
+    "还好吗", "没事吧", "怎么了", "担心你", "有点担心", "我很担心",
+    "别太勉强", "不要勉强", "休息一下", "难过", "不开心", "孤单", "孤独",
+)
+PROACTIVE_WARM_MARKERS = (
+    "想和你聊", "想找你说", "好久没聊", "陪我聊", "有空吗", "在忙吗",
+    "突然想和你", "突然想找你",
+)
+PROACTIVE_HAPPY_MARKERS = (
+    "好消息", "太好了", "真开心", "很开心", "想告诉你", "一起庆祝",
+)
+PROACTIVE_SURPRISE_MARKERS = ("吓了一跳", "没想到", "居然", "你猜怎么着")
+GREETING_WARM_MARKERS = (
+    "你来了", "你来啦", "来了啊", "欢迎回来", "回来啦", "好久不见",
+    "早上好", "下午好", "晚上好", "见到你", "今天怎么样", "今天过得",
+)
+GREETING_HAPPY_MARKERS = (
+    "太好了", "真开心", "很开心", "好高兴", "终于来了", "等你好久",
+)
+GREETING_TIRED_MARKERS = ("好困", "有点困", "没睡醒", "我好累", "我有点累")
 
 
 def default_emotion():
@@ -86,6 +135,8 @@ def default_emotion():
         "modifier": "none",
         "modifier_strength": 0.0,
         "modifier_turns_remaining": 0,
+        "voice_style": "conversational",
+        "voice_style_strength": 0.4,
         "user_mood": "neutral",
         "user_mood_strength": 0.0,
         "user_mood_set_at": None,
@@ -133,6 +184,8 @@ def _base_turn_signal(reason="no_clear_signal"):
         "modifier": "none",
         "modifier_strength": 0.0,
         "modifier_duration_turns": 0,
+        "voice_style": "conversational",
+        "voice_style_strength": 0.4,
         "user_mood": "neutral",
         "user_intensity": 0.0,
         "reset_primary": False,
@@ -158,9 +211,20 @@ def _set_modifier(signal, modifier, intensity, duration=None):
     )
 
 
+def _set_voice_style(signal, voice_style, intensity=0.6):
+    signal["voice_style"] = voice_style
+    signal["voice_style_strength"] = max(0.0, min(1.0, float(intensity)))
+
+
+def _emotion_text(text):
+    """移除“没那么孤单”等明确否定片段，减少简单关键词的反向误判。"""
+    return NEGATED_EMOTION_PATTERN.sub("", text)
+
+
 def plan_turn_emotion(user_message, emotion=None, relationship=None):
     """在生成回复前规划本轮反应，不依赖 Mio 自己即将生成的措辞。"""
     text = user_message if isinstance(user_message, str) else ""
+    emotional_text = _emotion_text(text)
     state = normalize_emotion(emotion)
     relationship = relationship if isinstance(relationship, dict) else {}
     affection = float(relationship.get("affection", 30) or 30)
@@ -171,35 +235,87 @@ def plan_turn_emotion(user_message, emotion=None, relationship=None):
     ability_praise = _contains_any(text, ABILITY_COMPLIMENT_MARKERS)
     general_praise = _contains_any(text, GENERAL_PRAISE_MARKERS)
 
-    if _contains_any(text, USER_SAD_MARKERS) or USER_SAD_PATTERN.search(text):
+    user_needs_support = False
+    if _contains_any(emotional_text, USER_SAD_MARKERS) or USER_SAD_PATTERN.search(emotional_text):
         signal["user_mood"] = "sad"
         signal["user_intensity"] = 0.82
         _set_modifier(signal, "worried", 0.78, 3)
+        _set_voice_style(signal, "concerned", 0.82)
         signal["reset_primary"] = True
         signal["reason"] = "user_is_sad"
-    elif _contains_any(text, USER_ANXIOUS_MARKERS) or USER_ANXIOUS_PATTERN.search(text):
+        user_needs_support = True
+    elif _contains_any(emotional_text, USER_LONELY_MARKERS):
+        signal["user_mood"] = "lonely"
+        signal["user_intensity"] = 0.78
+        _set_modifier(signal, "worried", 0.7, 3)
+        _set_voice_style(signal, "concerned", 0.78)
+        signal["reset_primary"] = True
+        signal["reason"] = "user_is_lonely"
+        user_needs_support = True
+    elif _contains_any(emotional_text, USER_ANXIOUS_MARKERS) or USER_ANXIOUS_PATTERN.search(emotional_text):
         signal["user_mood"] = "anxious"
         signal["user_intensity"] = 0.78
         _set_modifier(signal, "worried", 0.74, 3)
+        _set_voice_style(signal, "reassuring", 0.78)
         signal["reset_primary"] = True
         signal["reason"] = "user_is_anxious"
-    elif _contains_any(text, USER_ANGRY_MARKERS) or USER_ANGRY_PATTERN.search(text):
+        user_needs_support = True
+    elif _contains_any(emotional_text, USER_STRESSED_MARKERS):
+        signal["user_mood"] = "stressed"
+        signal["user_intensity"] = 0.58
+        _set_modifier(signal, "worried", 0.46, 2)
+        _set_voice_style(signal, "reassuring", 0.64)
+        signal["reset_primary"] = True
+        signal["reason"] = "user_is_stressed"
+        user_needs_support = True
+    elif _contains_any(emotional_text, USER_DISAPPOINTED_MARKERS):
+        signal["user_mood"] = "disappointed"
+        signal["user_intensity"] = 0.72
+        _set_modifier(signal, "worried", 0.65, 3)
+        _set_voice_style(signal, "concerned", 0.72)
+        signal["reset_primary"] = True
+        signal["reason"] = "user_is_disappointed"
+        user_needs_support = True
+    elif _contains_any(emotional_text, USER_TIRED_MARKERS):
+        signal["user_mood"] = "tired"
+        signal["user_intensity"] = 0.66
+        _set_modifier(signal, "worried", 0.52, 2)
+        _set_voice_style(signal, "reassuring", 0.68)
+        signal["reset_primary"] = True
+        signal["reason"] = "user_is_tired"
+        user_needs_support = True
+    elif _contains_any(emotional_text, USER_BORED_MARKERS):
+        signal["user_mood"] = "bored"
+        signal["user_intensity"] = 0.5
+        _set_voice_style(signal, "thoughtful", 0.58)
+        signal["reset_primary"] = True
+        signal["reason"] = "user_is_bored"
+        user_needs_support = True
+    elif _contains_any(emotional_text, USER_ANGRY_MARKERS) or USER_ANGRY_PATTERN.search(emotional_text):
         signal["user_mood"] = "angry"
         signal["user_intensity"] = 0.72
         _set_modifier(signal, "worried", 0.58, 2)
+        _set_voice_style(signal, "serious", 0.7)
         signal["reset_primary"] = True
         signal["reason"] = "user_is_angry"
-    elif _contains_any(text, USER_HAPPY_MARKERS) or USER_HAPPY_PATTERN.search(text):
+        user_needs_support = True
+    elif _contains_any(emotional_text, USER_HAPPY_MARKERS) or USER_HAPPY_PATTERN.search(emotional_text):
         signal["user_mood"] = "happy"
         signal["user_intensity"] = 0.78
         _set_primary(signal, "happy", 0.7, "sharing_user_happiness", 4)
         _set_modifier(signal, "touched", 0.45, 2)
+        _set_voice_style(signal, "cheerful", 0.74)
 
     if _contains_any(text, DIRECTED_NEGATIVE_MARKERS):
         signal["user_mood"] = "angry"
         signal["user_intensity"] = max(signal["user_intensity"], 0.78)
         _set_primary(signal, "sad", 0.76, "negative_words_toward_mio", 4)
         _set_modifier(signal, "worried", 0.55, 2)
+        _set_voice_style(signal, "disappointed", 0.78)
+    elif user_needs_support:
+        # 用户正在表达压力或低落时，先接住用户，不让同一句里较弱的夸奖、
+        # 问句或玩笑把 Mio 的反应抢走。
+        pass
     elif personal_praise:
         # 关系足够亲近且本来就在开心时，更可能坦然高兴；其他情况下保留
         # Mio 对直接夸奖的害羞反应。回复完成后还会根据实际措辞做一次校准。
@@ -207,25 +323,143 @@ def plan_turn_emotion(user_message, emotion=None, relationship=None):
         if accepts_warmly and _contains_any(text, DIRECT_AFFECTION_MARKERS):
             _set_primary(signal, "happy", 0.72, "warm_personal_compliment", 4)
             _set_modifier(signal, "touched", 0.58, 2)
+            _set_voice_style(signal, "warm", 0.74)
         else:
             _set_primary(signal, "shy", 0.76, "personal_compliment", 3)
+            _set_voice_style(signal, "bashful", 0.78)
     elif ability_praise:
         _set_primary(signal, "happy", 0.72, "ability_compliment", 5)
         _set_modifier(signal, "touched", 0.35, 1)
+        _set_voice_style(signal, "warm", 0.68)
     elif general_praise:
         _set_primary(signal, "happy", 0.62, "general_praise", 4)
+        _set_voice_style(signal, "cheerful", 0.64)
     elif _contains_any(text, CARE_MARKERS):
         _set_primary(signal, "happy", 0.62, "care_from_user", 4)
         _set_modifier(signal, "touched", 0.72, 3)
+        _set_voice_style(signal, "warm", 0.76)
     elif _contains_any(text, ANNOYED_MARKERS):
         _set_modifier(signal, "annoyed", 0.5, 2)
+        _set_voice_style(signal, "mild_annoyed", 0.55)
         signal["reason"] = "light_teasing"
     elif _contains_any(text, SURPRISE_MARKERS):
         _set_modifier(signal, "surprised", 0.62, 1)
+        _set_voice_style(signal, "surprised", 0.68)
         signal["reason"] = "surprising_information"
+    elif _contains_any(text, ADVICE_MARKERS):
+        _set_voice_style(signal, "thoughtful", 0.58)
+        signal["reason"] = "advice_request"
     elif ("?" in text or "？" in text or _contains_any(text, QUESTION_MARKERS)):
-        _set_modifier(signal, "curious", 0.35, 1)
-        signal["reason"] = "question"
+        # 普通提问只是对话形式，不等于 Mio 自己进入“好奇”情绪。
+        _set_voice_style(signal, "conversational", 0.45)
+        signal["reason"] = "ordinary_question"
+
+    return signal
+
+
+def plan_proactive_emotion(message, signals=None, emotion=None, relationship=None):
+    """规划 Mio 主动开口时的表情与声音，不把旧的用户情绪当成本轮输入。"""
+    text = message if isinstance(message, str) else ""
+    signals = signals if isinstance(signals, dict) else {}
+    state = normalize_emotion(emotion)
+    relationship = relationship if isinstance(relationship, dict) else {}
+    top_event = signals.get("top_event")
+    top_event = top_event if isinstance(top_event, dict) else {}
+    event_emotion = str(top_event.get("emotion", "neutral") or "neutral")
+    event_user_emotion = str(top_event.get("user_emotion", "neutral") or "neutral")
+    signal = _base_turn_signal("proactive_conversation")
+    signal["source"] = "proactive"
+
+    past_user_distress = event_user_emotion in {
+        "sad", "anxious", "angry", "lonely", "stressed", "tired", "disappointed"
+    }
+    if (
+        _contains_any(text, PROACTIVE_CONCERN_MARKERS)
+        or event_emotion == "worried"
+        or past_user_distress
+    ):
+        _set_modifier(signal, "worried", 0.68, 2)
+        _set_voice_style(signal, "concerned", 0.76)
+        signal["reason"] = "proactive_concern"
+    elif event_emotion == "touched":
+        _set_primary(signal, "happy", 0.58, "proactive_touched_event", 3)
+        _set_modifier(signal, "touched", 0.62, 2)
+        _set_voice_style(signal, "warm", 0.72)
+    elif event_emotion == "happy" or _contains_any(text, PROACTIVE_HAPPY_MARKERS):
+        _set_primary(signal, "happy", 0.62, "proactive_happy_topic", 3)
+        _set_voice_style(signal, "cheerful", 0.68)
+    elif event_emotion == "shy":
+        _set_primary(signal, "shy", 0.58, "proactive_shy_topic", 2)
+        _set_voice_style(signal, "bashful", 0.68)
+    elif event_emotion == "sad":
+        _set_primary(signal, "sad", 0.58, "proactive_sad_topic", 3)
+        _set_voice_style(signal, "disappointed", 0.68)
+    elif state.get("mood") == "tired" or float(state.get("fatigue_strength", 0.0) or 0.0) >= 0.65:
+        _set_voice_style(signal, "tired", 0.72)
+        signal["reason"] = "proactive_fatigue"
+    elif state.get("mood") == "sad":
+        _set_voice_style(signal, "disappointed", max(0.55, state.get("mood_strength", 0.0)))
+        signal["reason"] = "proactive_low_mood"
+    elif _contains_any(text, PROACTIVE_SURPRISE_MARKERS):
+        _set_modifier(signal, "surprised", 0.58, 1)
+        _set_voice_style(signal, "surprised", 0.64)
+        signal["reason"] = "proactive_surprise"
+    elif event_emotion == "curious":
+        _set_modifier(signal, "curious", 0.42, 1)
+        _set_voice_style(signal, "curious", 0.58)
+        signal["reason"] = "proactive_curiosity"
+    elif (
+        _contains_any(text, PROACTIVE_WARM_MARKERS)
+        or float(signals.get("idle_score", 0.0) or 0.0) > 0.1
+        and float(relationship.get("familiarity", 0.0) or 0.0) >= 30
+    ):
+        _set_voice_style(signal, "warm", 0.62)
+        signal["reason"] = "proactive_warm_contact"
+    elif "？" in text or "?" in text:
+        _set_modifier(signal, "curious", 0.42, 1)
+        _set_voice_style(signal, "curious", 0.58)
+        signal["reason"] = "proactive_curiosity"
+
+    return signal
+
+
+def plan_greeting_emotion(message="", emotion=None, relationship=None):
+    """规划启动问候的表情和声音；启动本身不代表用户表达了新情绪。"""
+    text = message if isinstance(message, str) else ""
+    state = normalize_emotion(emotion)
+    relationship = relationship if isinstance(relationship, dict) else {}
+    signal = _base_turn_signal("startup_greeting")
+    signal["source"] = "greeting"
+
+    if _contains_any(text, PROACTIVE_CONCERN_MARKERS):
+        _set_modifier(signal, "worried", 0.58, 2)
+        _set_voice_style(signal, "concerned", 0.68)
+        signal["reason"] = "greeting_concern"
+    elif state.get("mood") == "tired" or float(state.get("fatigue_strength", 0.0) or 0.0) >= 0.65:
+        _set_voice_style(signal, "tired", 0.7)
+        signal["reason"] = "greeting_tired"
+    elif state.get("mood") == "sad":
+        _set_voice_style(signal, "disappointed", max(0.55, state.get("mood_strength", 0.0)))
+        signal["reason"] = "greeting_low_mood"
+    elif state.get("mood") == "shy" or _contains_any(text, SHY_REPLY_MARKERS):
+        _set_voice_style(signal, "bashful", max(0.58, state.get("mood_strength", 0.0)))
+        signal["reason"] = "greeting_bashful"
+    elif state.get("mood") == "happy":
+        _set_voice_style(signal, "cheerful", max(0.58, state.get("mood_strength", 0.0)))
+        signal["reason"] = "greeting_cheerful"
+    elif _contains_any(text, GREETING_TIRED_MARKERS):
+        _set_voice_style(signal, "tired", 0.66)
+        signal["reason"] = "greeting_sounds_tired"
+    elif _contains_any(text, GREETING_HAPPY_MARKERS):
+        _set_primary(signal, "happy", 0.52, "greeting_happy_to_see_user", 2)
+        _set_voice_style(signal, "cheerful", 0.62)
+    elif (
+        _contains_any(text, GREETING_WARM_MARKERS)
+        or float(relationship.get("familiarity", 0.0) or 0.0) >= 30
+        or float(relationship.get("affection", 0.0) or 0.0) >= 45
+    ):
+        _set_voice_style(signal, "warm", 0.58)
+        signal["reason"] = "greeting_warm"
 
     return signal
 
@@ -253,8 +487,18 @@ def infer_interaction_emotion(user_message, ai_reply, relationship=None, planned
     reply_is_happy = _contains_any(reply_text, HAPPY_REPLY_MARKERS)
     if reply_is_shy:
         _set_primary(signal, "shy", 0.86, "shy_reaction_to_praise", 3)
+        _set_voice_style(
+            signal,
+            "embarrassed" if _contains_any(reply_text, ("害羞", "脸红", "红着脸")) else "bashful",
+            0.84,
+        )
     elif reply_is_happy:
         _set_primary(signal, "happy", 0.7, "accepted_compliment", 4)
+        _set_voice_style(
+            signal,
+            "warm" if _contains_any(text, PERSONAL_COMPLIMENT_MARKERS) else "cheerful",
+            0.7,
+        )
     return signal
 
 
@@ -264,6 +508,7 @@ def has_interaction_signal(signal):
     return any((
         signal.get("mood") not in (None, "neutral"),
         signal.get("modifier") not in (None, "none"),
+        signal.get("voice_style") not in (None, ""),
         signal.get("user_mood") not in (None, "neutral"),
         bool(signal.get("reset_primary")),
     ))
@@ -285,13 +530,21 @@ def _event_signal(event):
     signal["user_intensity"] = intensity if signal["user_mood"] != "neutral" else 0.0
     if emotion in {"happy", "shy", "sad"}:
         _set_primary(signal, emotion, intensity, "long_term_event")
+        _set_voice_style(
+            signal,
+            {"happy": "cheerful", "shy": "bashful", "sad": "disappointed"}[emotion],
+            intensity,
+        )
     elif emotion == "touched":
         _set_primary(signal, "happy", intensity * 0.8, "touching_event", 4)
         _set_modifier(signal, "touched", intensity, 3)
+        _set_voice_style(signal, "warm", intensity)
     elif emotion == "worried":
         _set_modifier(signal, "worried", intensity, 3)
+        _set_voice_style(signal, "concerned", intensity)
     elif emotion == "curious":
         _set_modifier(signal, "curious", intensity, 1)
+        _set_voice_style(signal, "curious", intensity)
     return signal
 
 
@@ -412,11 +665,23 @@ def _apply_user_emotion(emotion, signal, now):
     emotion["user_mood_set_at"] = now.isoformat()
 
 
+def _apply_voice_style(emotion, signal):
+    """保存本轮说话方式；它与持续 mood 相互独立，不参与 mood 寿命计算。"""
+    voice_style = signal.get("voice_style") if isinstance(signal, dict) else None
+    if voice_style not in ALLOWED_VOICE_STYLES:
+        voice_style = "conversational"
+    emotion["voice_style"] = voice_style
+    emotion["voice_style_strength"] = max(
+        0.0,
+        min(1.0, float(signal.get("voice_style_strength", 0.4) or 0.4)),
+    )
+
+
 def _fatigue_strength(energy):
     return max(0.0, min(1.0, (45.0 - float(energy)) / 25.0))
 
 
-def update_emotion(emotion, event=None, interaction=None):
+def update_emotion(emotion, event=None, interaction=None, consume_energy=True):
     """推进一轮情绪状态；即时反应优先，事件分析只作为兜底。"""
     normalized = normalize_emotion(emotion)
     emotion.clear()
@@ -426,7 +691,8 @@ def update_emotion(emotion, event=None, interaction=None):
 
     elapsed = _elapsed_minutes(emotion.get("last_updated"), now)
     mood_elapsed = _elapsed_minutes(emotion.get("mood_set_at"), now)
-    emotion["energy"] -= 1
+    if consume_energy:
+        emotion["energy"] -= 1
     if elapsed is not None:
         emotion["energy"] += min(
             elapsed * ENERGY_RECOVERY_PER_MINUTE,
@@ -440,6 +706,7 @@ def update_emotion(emotion, event=None, interaction=None):
         signal = _base_turn_signal()
 
     _apply_user_emotion(emotion, signal, now)
+    _apply_voice_style(emotion, signal)
     _advance_modifier(emotion, signal)
 
     has_primary = signal.get("mood") not in (None, "neutral")
