@@ -6,7 +6,7 @@ import threading
 import unittest
 import wave
 
-from tts_service import (
+from anime_assistant.speech.service import (
     AivisSpeechError,
     MioStyleBertClient,
     MioStyleBertError,
@@ -17,7 +17,7 @@ from tts_service import (
     prepare_spoken_text,
     split_sentences,
 )
-from tts_gpt_sovits_worker import force_all_japanese_segments
+from anime_assistant.speech.gpt_sovits_worker import force_all_japanese_segments
 
 
 def make_test_wav(sample_rate=8000, duration=0.3):

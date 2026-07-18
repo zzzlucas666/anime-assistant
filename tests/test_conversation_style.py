@@ -1,9 +1,9 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from ai import chat
-from intent_manager import _local_detect_intent
-from router import handle_intent
+from anime_assistant.ai import chat
+from anime_assistant.conversation.intent_manager import _local_detect_intent
+from anime_assistant.conversation.router import handle_intent
 
 
 class PreferenceRoutingTests(unittest.TestCase):
@@ -81,7 +81,7 @@ class ConversationStylePromptTests(unittest.TestCase):
             },
         }
 
-        with patch("ai.chat.create_ai_client", return_value=client):
+        with patch("anime_assistant.ai.chat.create_ai_client", return_value=client):
             greeting = chat.generate_greeting(context)
 
         prompt = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
@@ -99,7 +99,7 @@ class ConversationStylePromptTests(unittest.TestCase):
             "event_memory_hint": "无",
             "long_term_summary_hint": "无",
         }
-        with patch("ai.chat.build_memory_context", return_value=memory):
+        with patch("anime_assistant.ai.chat.build_memory_context", return_value=memory):
             prompt = chat.build_system_prompt(context, "你喜欢什么天气")
 
         self.assertIn("日常聊天通常只回复 1~2 句", prompt)
@@ -123,7 +123,7 @@ class ConversationStylePromptTests(unittest.TestCase):
             "event_memory_hint": "无",
             "long_term_summary_hint": "无",
         }
-        with patch("ai.chat.build_memory_context", return_value=memory):
+        with patch("anime_assistant.ai.chat.build_memory_context", return_value=memory):
             prompt = chat.build_system_prompt(
                 context,
                 "主动找用户聊天",
@@ -143,8 +143,8 @@ class ConversationStylePromptTests(unittest.TestCase):
             }
         }
         with (
-            patch("ai.chat.build_system_prompt", return_value="system"),
-            patch("ai.chat.create_ai_client", return_value=client),
+            patch("anime_assistant.ai.chat.build_system_prompt", return_value="system"),
+            patch("anime_assistant.ai.chat.create_ai_client", return_value=client),
         ):
             chat._create_stream(
                 [{"role": "user", "content": "你喜欢什么天气"}],
@@ -168,8 +168,8 @@ class ConversationStylePromptTests(unittest.TestCase):
             }
         }
         with (
-            patch("ai.chat.build_system_prompt", return_value="system"),
-            patch("ai.chat.create_ai_client", return_value=client),
+            patch("anime_assistant.ai.chat.build_system_prompt", return_value="system"),
+            patch("anime_assistant.ai.chat.create_ai_client", return_value=client),
         ):
             chat._create_stream(
                 [{"role": "user", "content": "你害怕很多人的目光吗"}],
@@ -194,8 +194,8 @@ class ConversationStylePromptTests(unittest.TestCase):
             }
         }
         with (
-            patch("ai.chat.build_system_prompt", return_value="system"),
-            patch("ai.chat.create_ai_client", return_value=client),
+            patch("anime_assistant.ai.chat.build_system_prompt", return_value="system"),
+            patch("anime_assistant.ai.chat.create_ai_client", return_value=client),
         ):
             chat._create_stream([], context)
 
@@ -226,7 +226,7 @@ class EmptyStreamRecoveryTests(unittest.TestCase):
     def test_empty_stream_is_retried_and_second_reply_is_returned(self):
         reply_chunk = self._content_chunk("嗯，会有一点。不过熟悉之后就好多了。")
 
-        with patch("ai.chat._create_stream", side_effect=[[], [reply_chunk]]) as create_stream:
+        with patch("anime_assistant.ai.chat._create_stream", side_effect=[[], [reply_chunk]]) as create_stream:
             result = list(chat.chat_with_ai_stream([], {}))
 
         self.assertEqual(result, ["嗯，会有一点。不过熟悉之后就好多了。"])
@@ -236,7 +236,7 @@ class EmptyStreamRecoveryTests(unittest.TestCase):
         fallback = "抱歉…刚刚好像没听清，可以再说一遍吗？"
 
         with (
-            patch("ai.chat._create_stream", side_effect=[[], []]) as create_stream,
+            patch("anime_assistant.ai.chat._create_stream", side_effect=[[], []]) as create_stream,
             patch("random.choice", return_value=fallback),
         ):
             result = list(chat.chat_with_ai_stream([], {}))
@@ -252,7 +252,7 @@ class EmptyStreamRecoveryTests(unittest.TestCase):
         ]
         controls = []
 
-        with patch("ai.chat._create_stream", return_value=chunks):
+        with patch("anime_assistant.ai.chat._create_stream", return_value=chunks):
             result = list(chat.chat_with_ai_stream(
                 [], {}, on_emotion_control=controls.append
             ))
@@ -271,7 +271,7 @@ class EmptyStreamRecoveryTests(unittest.TestCase):
         chunks = [self._content_chunk("普通回复末尾刚好有<mi字样")]
         controls = []
 
-        with patch("ai.chat._create_stream", return_value=chunks):
+        with patch("anime_assistant.ai.chat._create_stream", return_value=chunks):
             result = list(chat.chat_with_ai_stream(
                 [], {}, on_emotion_control=controls.append
             ))
@@ -285,7 +285,7 @@ class EmptyStreamRecoveryTests(unittest.TestCase):
         )]
         controls = []
 
-        with patch("ai.chat._create_stream", return_value=chunks):
+        with patch("anime_assistant.ai.chat._create_stream", return_value=chunks):
             result = list(chat.chat_with_ai_stream(
                 [], {}, on_emotion_control=controls.append
             ))

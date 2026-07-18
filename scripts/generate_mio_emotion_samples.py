@@ -11,8 +11,8 @@ import wave
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from config_loader import load_config
-from tts_service import MioGPTSoVITSClient, SpeechSynthesisService
+from anime_assistant.infrastructure.config import load_config
+from anime_assistant.speech.service import MioGPTSoVITSClient, SpeechSynthesisService
 
 
 SAMPLES = (

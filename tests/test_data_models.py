@@ -5,15 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import emotion_manager
-import event_manager
-import intent_manager
-import memory_manager
-import profile_extractor
-import profile_manager
-import relationship_manager
-from config_loader import DEFAULT_CONFIG
-from data_models import (
+from anime_assistant.emotion import manager as emotion_manager
+from anime_assistant.memory import event_manager, memory_manager
+from anime_assistant.conversation import intent_manager
+from anime_assistant.character import profile_extractor, profile_manager, relationship_manager
+from anime_assistant.infrastructure.config import DEFAULT_CONFIG
+from anime_assistant.infrastructure.models import (
     normalize_app_config,
     normalize_emotion,
     normalize_event_extraction,
@@ -129,7 +126,7 @@ class AIValidationIntegrationTests(unittest.TestCase):
         client = fake_client_with_content(
             '```json\n{"intent":"get_profile","confidence":8,"slots":[]}\n```'
         )
-        with patch("intent_manager.create_ai_client", return_value=client):
+        with patch("anime_assistant.conversation.intent_manager.create_ai_client", return_value=client):
             result = intent_manager.detect_intent(
                 "key", "model", "你还记得昨天那件事吗", {}, {}, "https://example.invalid"
             )
@@ -137,7 +134,7 @@ class AIValidationIntegrationTests(unittest.TestCase):
 
     def test_profile_extractor_rejects_unknown_action(self):
         client = fake_client_with_content('{"action":"delete_profile","value":"all"}')
-        with patch("profile_extractor.create_ai_client", return_value=client):
+        with patch("anime_assistant.character.profile_extractor.create_ai_client", return_value=client):
             result = profile_extractor.extract_profile_info("key", "model", "text")
         self.assertEqual(result, {"action": "none", "value": ""})
 
@@ -147,8 +144,8 @@ class AIValidationIntegrationTests(unittest.TestCase):
             '"impact":"invalid","importance":"5"}'
         )
         with (
-            patch("event_manager.create_ai_client", return_value=client),
-            patch("event_manager.embed_text", return_value=None),
+            patch("anime_assistant.memory.event_manager.create_ai_client", return_value=client),
+            patch("anime_assistant.memory.event_manager.embed_text", return_value=None),
         ):
             event = event_manager.extract_event("key", "model", "user", "reply")
         self.assertEqual(event["event"], "plan")

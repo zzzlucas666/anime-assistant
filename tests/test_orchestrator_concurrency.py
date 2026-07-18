@@ -2,9 +2,9 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from context_manager import ContextManager
-from ai.fallbacks import FALLBACK_REPLIES
-from orchestrator import ConversationOrchestrator
+from anime_assistant.conversation.context_manager import ContextManager
+from anime_assistant.ai.fallbacks import FALLBACK_REPLIES
+from anime_assistant.conversation.orchestrator import ConversationOrchestrator
 
 
 class OrchestratorSnapshotTests(unittest.TestCase):
@@ -30,9 +30,9 @@ class OrchestratorSnapshotTests(unittest.TestCase):
 
         try:
             with (
-                patch("orchestrator.detect_intent", return_value={"intent": "chat", "confidence": 1.0}),
-                patch("orchestrator.save_memory", side_effect=preserve_history),
-                patch("orchestrator.update_last_interaction_time"),
+                patch("anime_assistant.conversation.orchestrator.detect_intent", return_value={"intent": "chat", "confidence": 1.0}),
+                patch("anime_assistant.conversation.orchestrator.save_memory", side_effect=preserve_history),
+                patch("anime_assistant.conversation.orchestrator.update_last_interaction_time"),
             ):
                 prepared = orchestrator.prepare_turn("hello")
 
@@ -70,7 +70,7 @@ class OrchestratorSnapshotTests(unittest.TestCase):
             return shared_history, []
 
         try:
-            with patch("orchestrator.save_memory", side_effect=preserve_history):
+            with patch("anime_assistant.conversation.orchestrator.save_memory", side_effect=preserve_history):
                 reply = orchestrator.finalize_turn(prepared, FALLBACK_REPLIES[0])
 
             self.assertEqual(reply, FALLBACK_REPLIES[0])
@@ -100,9 +100,9 @@ class OrchestratorSnapshotTests(unittest.TestCase):
 
         try:
             with (
-                patch("orchestrator.detect_intent", return_value={"intent": "chat", "confidence": 1.0}),
-                patch("orchestrator.save_memory", side_effect=lambda items: (items, [])),
-                patch("orchestrator.update_last_interaction_time"),
+                patch("anime_assistant.conversation.orchestrator.detect_intent", return_value={"intent": "chat", "confidence": 1.0}),
+                patch("anime_assistant.conversation.orchestrator.save_memory", side_effect=lambda items: (items, [])),
+                patch("anime_assistant.conversation.orchestrator.update_last_interaction_time"),
             ):
                 prepared = orchestrator.prepare_turn("new")
 

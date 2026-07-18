@@ -106,6 +106,29 @@ python main_gui.py
 
 如果未安装 Live2D 依赖、未配置模型，或模型路径无效，GUI 会自动退化为纯聊天界面。
 
+## 项目结构
+
+业务代码统一放在 `anime_assistant/` 功能包中，仓库根目录只保留兼容启动入口、
+配置、文档、测试和开发脚本。原有启动命令保持不变。
+
+```text
+anime_assistant/
+├─ ai/              # AI 客户端、主回复与兜底
+├─ character/       # 人设、资料、关系与行为规则
+├─ conversation/    # 对话编排、意图、路由与上下文
+├─ emotion/         # 情绪候选、信号协议与状态机
+├─ infrastructure/  # 配置、路径、日志、模型校验与 JSON 存储
+├─ live2d/          # 模型画布、参数控制与调参工具
+├─ memory/          # 短期、长期、语义和事件记忆
+├─ proactive/       # 主动聊天、交互与冷却追踪
+├─ speech/          # TTS 后端、文本切分、WAV 与嘴型处理
+└─ ui/              # Qt 主窗口、后台工作线程与音频播放
+```
+
+`main.py` 和 `main_gui.py` 只是轻量兼容入口，分别转交给
+`anime_assistant.console` 和 `anime_assistant.ui.main_window`。本地旧配置中记录的
+TTS worker 路径会在加载时自动迁移到新的包内位置。
+
 ### Mio 本地语音与 AivisSpeech
 
 将 `tts_backend` 设为 `mio_style_bert_vits2` 或
@@ -191,7 +214,10 @@ python -m unittest discover -s tests -v
 提示或调整声音映射后，应保持这些样例通过；确实要改变既定行为时，应先人工
 确认新表现，再同步更新样例和对应测试。
 
-`test_live2d_load.py` 和 `test_live2d_glfw.py` 是需要真实显示器与 OpenGL 环境的人工诊断脚本，不属于自动化测试。模型路径通过第一个命令行参数或 `LIVE2D_MODEL_PATH` 环境变量传入。
+`scripts/test_live2d_load.py` 和 `scripts/test_live2d_glfw.py` 是需要真实显示器与 OpenGL 环境的人工诊断脚本，不属于自动化测试。模型路径通过第一个命令行参数或 `LIVE2D_MODEL_PATH` 环境变量传入。
+
+`tests/test_package_layout.py` 固定功能包边界、根目录兼容入口和本地 TTS worker
+位置，避免后续开发再次把大型业务模块堆回项目根目录。
 
 ## 数据与隐私
 

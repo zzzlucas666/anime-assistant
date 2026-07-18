@@ -5,10 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ai.client import DEFAULT_BASE_URL, create_ai_client
-from ai.chat import get_user_display_name, load_persona
-from app_paths import APP_ROOT, CONFIG_DIR, DATA_DIR, resolve_project_path
-from config_loader import (
+from anime_assistant.ai.client import DEFAULT_BASE_URL, create_ai_client
+from anime_assistant.ai.chat import get_user_display_name, load_persona
+from anime_assistant.infrastructure.paths import APP_ROOT, CONFIG_DIR, DATA_DIR, resolve_project_path
+from anime_assistant.infrastructure.config import (
     DEFAULT_CONFIG,
     load_config,
     save_live2d_parameter_preset,
@@ -16,16 +16,16 @@ from config_loader import (
     save_live2d_waiting_motion_intensity,
     save_live2d_waiting_motion_speed,
 )
-from live2d_model_utils import resolve_live2d_model_path
+from anime_assistant.live2d.model_utils import resolve_live2d_model_path
 
 
 class ConfigurationAndPathTests(unittest.TestCase):
     def test_ai_client_uses_default_or_configured_base_url(self):
-        with patch("ai.client.OpenAI") as openai:
+        with patch("anime_assistant.ai.client.OpenAI") as openai:
             create_ai_client("key")
             openai.assert_called_once_with(api_key="key", base_url=DEFAULT_BASE_URL)
 
-        with patch("ai.client.OpenAI") as openai:
+        with patch("anime_assistant.ai.client.OpenAI") as openai:
             create_ai_client("key", "https://example.invalid/v1")
             openai.assert_called_once_with(api_key="key", base_url="https://example.invalid/v1")
 
@@ -87,6 +87,28 @@ class ConfigurationAndPathTests(unittest.TestCase):
             loaded = load_config(config_path)
 
         self.assertEqual(loaded["tts_backend"], "mio_gpt_sovits_v2proplus")
+
+    def test_legacy_tts_worker_paths_migrate_to_package_locations(self):
+        configured = {
+            "api_key": "test-key",
+            "model": "test-model",
+            "assistant_name": "Mio",
+            "mio_tts_worker": "tts_style_bert_worker.py",
+            "mio_gpt_sovits_worker": "tts_gpt_sovits_worker.py",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "settings.json"
+            config_path.write_text(json.dumps(configured), encoding="utf-8")
+            loaded = load_config(config_path)
+
+        self.assertEqual(
+            loaded["mio_tts_worker"],
+            "anime_assistant/speech/style_bert_worker.py",
+        )
+        self.assertEqual(
+            loaded["mio_gpt_sovits_worker"],
+            "anime_assistant/speech/gpt_sovits_worker.py",
+        )
 
     def test_live2d_parameter_preset_is_saved_without_losing_config(self):
         config = {

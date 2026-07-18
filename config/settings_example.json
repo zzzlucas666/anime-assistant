@@ -32,7 +32,7 @@
         "tired": 1878365379
     },
     "mio_tts_python": "data/training_tools/Style-Bert-VITS2/venv/Scripts/python.exe",
-    "mio_tts_worker": "tts_style_bert_worker.py",
+    "mio_tts_worker": "anime_assistant/speech/style_bert_worker.py",
     "mio_tts_repo": "data/training_tools/Style-Bert-VITS2",
     "mio_tts_model": "data/mio_voice_dataset/style_bert_vits2/model_assets/mio_pilot_v1/mio_pilot_v1_e43_s2000.safetensors",
     "mio_tts_config": "data/mio_voice_dataset/style_bert_vits2/model_assets/mio_pilot_v1/config.json",
@@ -46,7 +46,7 @@
     "mio_tts_noise_w": 0.7,
     "mio_tts_style_weight": 1.0,
     "mio_gpt_sovits_python": "data/training_tools/GPT-SoVITS/.venv/Scripts/python.exe",
-    "mio_gpt_sovits_worker": "tts_gpt_sovits_worker.py",
+    "mio_gpt_sovits_worker": "anime_assistant/speech/gpt_sovits_worker.py",
     "mio_gpt_sovits_repo": "data/training_tools/GPT-SoVITS",
     "mio_gpt_sovits_gpt_weights": "data/mio_voice_dataset/gpt_sovits/v2proplus_v1/weights/gpt/mio_v2proplus_v1-e15.ckpt",
     "mio_gpt_sovits_sovits_weights": "data/mio_voice_dataset/gpt_sovits/v2proplus_v1/weights/sovits/mio_v2proplus_v1_e8_s768.pth",
