@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import event_manager
+from anime_assistant.memory import event_manager
 
 
 class EventMigrationTests(unittest.TestCase):

@@ -2,7 +2,7 @@ import random
 import unittest
 from unittest.mock import patch
 
-from character_controller import CharacterController
+from anime_assistant.live2d.controller import CharacterController
 
 
 class FakeClock:
@@ -40,7 +40,7 @@ class CharacterControllerTests(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock()
         self.clock_patch = patch(
-            "character_controller.time.monotonic", self.clock.monotonic
+            "anime_assistant.live2d.controller.time.monotonic", self.clock.monotonic
         )
         self.clock_patch.start()
         self.addCleanup(self.clock_patch.stop)

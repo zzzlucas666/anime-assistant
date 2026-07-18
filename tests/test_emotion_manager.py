@@ -1,6 +1,6 @@
 import unittest
 
-from emotion_manager import (
+from anime_assistant.emotion.manager import (
     apply_ai_emotion_control,
     has_interaction_signal,
     infer_interaction_emotion,

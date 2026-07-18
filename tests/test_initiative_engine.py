@@ -3,7 +3,7 @@ import unittest
 import datetime
 from unittest.mock import Mock, patch
 
-from initiative_engine import InitiativeEngine
+from anime_assistant.proactive.initiative_engine import InitiativeEngine
 
 
 class InitiativeEngineCompatibilityTests(unittest.TestCase):
@@ -31,14 +31,14 @@ class InitiativeEngineCompatibilityTests(unittest.TestCase):
         }
 
         with (
-            patch("initiative_engine.can_trigger_proactive", return_value=True),
-            patch("initiative_engine.load_last_interaction_time", return_value=None),
+            patch("anime_assistant.proactive.initiative_engine.can_trigger_proactive", return_value=True),
+            patch("anime_assistant.proactive.initiative_engine.load_last_interaction_time", return_value=None),
             patch.object(engine, "_compute_signals", return_value=signals),
-            patch("initiative_engine.generate_proactive_message", return_value="generated") as generate,
-            patch("initiative_engine.mark_event_notified") as mark_notified,
-            patch("initiative_engine.save_emotion"),
+            patch("anime_assistant.proactive.initiative_engine.generate_proactive_message", return_value="generated") as generate,
+            patch("anime_assistant.proactive.initiative_engine.mark_event_notified") as mark_notified,
+            patch("anime_assistant.proactive.initiative_engine.save_emotion"),
             patch.object(engine, "_record_message", return_value=[]) as record_message,
-            patch("initiative_engine.summarize_pending_if_ready", return_value=False),
+            patch("anime_assistant.proactive.initiative_engine.summarize_pending_if_ready", return_value=False),
         ):
             message = engine.check_and_trigger()
 
@@ -79,13 +79,13 @@ class InitiativeEngineCompatibilityTests(unittest.TestCase):
             return "generated"
 
         with (
-            patch("initiative_engine.can_trigger_proactive", return_value=True),
-            patch("initiative_engine.load_last_interaction_time", return_value=interaction_time),
+            patch("anime_assistant.proactive.initiative_engine.can_trigger_proactive", return_value=True),
+            patch("anime_assistant.proactive.initiative_engine.load_last_interaction_time", return_value=interaction_time),
             patch.object(engine, "_compute_signals", return_value=signals),
-            patch("initiative_engine.generate_proactive_message", side_effect=generate_while_unlocked),
-            patch("initiative_engine.save_emotion"),
+            patch("anime_assistant.proactive.initiative_engine.generate_proactive_message", side_effect=generate_while_unlocked),
+            patch("anime_assistant.proactive.initiative_engine.save_emotion"),
             patch.object(engine, "_record_message", return_value=[]) as record_message,
-            patch("initiative_engine.summarize_pending_if_ready", return_value=False),
+            patch("anime_assistant.proactive.initiative_engine.summarize_pending_if_ready", return_value=False),
         ):
             message = engine.check_and_trigger()
 
@@ -140,14 +140,14 @@ class InitiativeEngineCompatibilityTests(unittest.TestCase):
             return []
 
         with (
-            patch("initiative_engine.can_trigger_proactive", return_value=True),
-            patch("initiative_engine.load_last_interaction_time", return_value=None),
+            patch("anime_assistant.proactive.initiative_engine.can_trigger_proactive", return_value=True),
+            patch("anime_assistant.proactive.initiative_engine.load_last_interaction_time", return_value=None),
             patch.object(engine, "_compute_signals", return_value=signals),
-            patch("initiative_engine.generate_proactive_message", side_effect=generate),
-            patch("initiative_engine.mark_event_notified"),
-            patch("initiative_engine.save_emotion"),
+            patch("anime_assistant.proactive.initiative_engine.generate_proactive_message", side_effect=generate),
+            patch("anime_assistant.proactive.initiative_engine.mark_event_notified"),
+            patch("anime_assistant.proactive.initiative_engine.save_emotion"),
             patch.object(engine, "_record_message", side_effect=record_after_emotion),
-            patch("initiative_engine.summarize_pending_if_ready", return_value=False),
+            patch("anime_assistant.proactive.initiative_engine.summarize_pending_if_ready", return_value=False),
         ):
             message = engine.check_and_trigger()
 
@@ -180,10 +180,10 @@ class InitiativeEngineCompatibilityTests(unittest.TestCase):
         }
 
         with (
-            patch("initiative_engine.can_trigger_proactive", return_value=True),
-            patch("initiative_engine.load_last_interaction_time", side_effect=[before, after]),
+            patch("anime_assistant.proactive.initiative_engine.can_trigger_proactive", return_value=True),
+            patch("anime_assistant.proactive.initiative_engine.load_last_interaction_time", side_effect=[before, after]),
             patch.object(engine, "_compute_signals", return_value=signals),
-            patch("initiative_engine.generate_proactive_message", return_value="stale"),
+            patch("anime_assistant.proactive.initiative_engine.generate_proactive_message", return_value="stale"),
             patch.object(engine, "_record_message") as record_message,
         ):
             message = engine.check_and_trigger()

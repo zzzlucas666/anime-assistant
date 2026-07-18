@@ -1,0 +1,1 @@
+"""Anime Assistant application package."""

@@ -2,8 +2,8 @@ import json
 import unittest
 from pathlib import Path
 
-from ai.chat import parse_emotion_control_tag
-from emotion_manager import (
+from anime_assistant.ai.chat import parse_emotion_control_tag
+from anime_assistant.emotion.manager import (
     apply_ai_emotion_control,
     infer_interaction_emotion,
     plan_turn_emotion,

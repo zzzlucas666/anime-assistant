@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import memory_manager
-from ai.fallbacks import FALLBACK_REPLIES
+from anime_assistant.memory import memory_manager
+from anime_assistant.ai.fallbacks import FALLBACK_REPLIES
 
 
 class SaveMemoryTests(unittest.TestCase):

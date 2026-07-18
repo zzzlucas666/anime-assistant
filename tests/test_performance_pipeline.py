@@ -6,11 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import event_manager
-import long_term_memory
-import semantic_memory
-from context_manager import ContextManager
-from orchestrator import ConversationOrchestrator
+from anime_assistant.memory import event_manager, long_term_memory, semantic_memory
+from anime_assistant.conversation.context_manager import ContextManager
+from anime_assistant.conversation.orchestrator import ConversationOrchestrator
 
 
 class SemanticFallbackTests(unittest.TestCase):
@@ -35,7 +33,7 @@ class SemanticFallbackTests(unittest.TestCase):
             {"id": "vector", "event": "unrelated", "embedding": [1.0, 0.0]},
             {"id": "missing", "event": "数学考试复习", "embedding": None},
         ]
-        with patch("semantic_memory.embed_text", return_value=[1.0, 0.0]):
+        with patch("anime_assistant.memory.semantic_memory.embed_text", return_value=[1.0, 0.0]):
             scores = semantic_memory.compute_similarity_scores("数学考试", candidates)
 
         self.assertIn("vector", scores)
@@ -52,7 +50,7 @@ class EventCacheTests(unittest.TestCase):
 
             with (
                 patch.object(event_manager, "EVENT_PATH", str(event_path)),
-                patch("event_manager.safe_load_json", wraps=original_loader) as loader,
+                patch("anime_assistant.memory.event_manager.safe_load_json", wraps=original_loader) as loader,
             ):
                 event_manager.clear_event_cache()
                 first = event_manager.load_all_events()
@@ -79,12 +77,12 @@ class SummaryBatchTests(unittest.TestCase):
                 patch.object(long_term_memory, "SUMMARY_PATH", str(summary_path)),
             ):
                 long_term_memory.queue_summary_messages(messages[:2])
-                with patch("long_term_memory.summarize_overflow") as summarize:
+                with patch("anime_assistant.memory.long_term_memory.summarize_overflow") as summarize:
                     self.assertFalse(long_term_memory.summarize_pending_if_ready("k", "m", batch_size=3))
                     summarize.assert_not_called()
 
                 long_term_memory.queue_summary_messages(messages[2:])
-                with patch("long_term_memory.summarize_overflow", return_value={}) as summarize:
+                with patch("anime_assistant.memory.long_term_memory.summarize_overflow", return_value={}) as summarize:
                     self.assertTrue(long_term_memory.summarize_pending_if_ready("k", "m", batch_size=3))
                     summarize.assert_called_once_with("k", "m", messages, None)
 
@@ -122,14 +120,14 @@ class BackgroundPostprocessTests(unittest.TestCase):
 
         try:
             with (
-                patch("orchestrator.save_memory", side_effect=lambda shared: (shared, [])),
-                patch("orchestrator.queue_summary_messages"),
-                patch("orchestrator.extract_event", side_effect=slow_extract),
-                patch("orchestrator.save_emotion"),
-                patch("orchestrator.save_event"),
-                patch("orchestrator.update_relationship", side_effect=lambda state, event: state),
-                patch("orchestrator.save_relationship"),
-                patch("orchestrator.summarize_pending_if_ready", return_value=False),
+                patch("anime_assistant.conversation.orchestrator.save_memory", side_effect=lambda shared: (shared, [])),
+                patch("anime_assistant.conversation.orchestrator.queue_summary_messages"),
+                patch("anime_assistant.conversation.orchestrator.extract_event", side_effect=slow_extract),
+                patch("anime_assistant.conversation.orchestrator.save_emotion"),
+                patch("anime_assistant.conversation.orchestrator.save_event"),
+                patch("anime_assistant.conversation.orchestrator.update_relationship", side_effect=lambda state, event: state),
+                patch("anime_assistant.conversation.orchestrator.save_relationship"),
+                patch("anime_assistant.conversation.orchestrator.summarize_pending_if_ready", return_value=False),
             ):
                 started_at = time.perf_counter()
                 reply = orchestrator.finalize_turn(prepared, "reply")
