@@ -3,25 +3,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from io import BytesIO
 import json
-import math
 import os
 from pathlib import Path
 import queue
-import re
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import wave
 import uuid
 
 from anime_assistant.ai.client import create_ai_client
 from anime_assistant.infrastructure.paths import resolve_project_path
 from anime_assistant.infrastructure.logging import get_logger
+from anime_assistant.speech.audio import (
+    SpeechAudio,
+    build_mouth_envelope,
+    combine_speech_audio,
+)
+from anime_assistant.speech.text import (
+    contains_japanese_kana,
+    prepare_spoken_text,
+    split_sentences,
+)
 
 
 logger = get_logger(__name__)
@@ -208,11 +214,6 @@ DEFAULT_MOOD_SPEAKERS = {
     "tired": 1878365379,    # コハク / ねむたい
 }
 
-_STAGE_DIRECTION_RE = re.compile(r"\([^()]{1,80}\)|（[^（）]{1,80}）")
-_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[。！？!?])")
-_KANA_RE = re.compile(r"[\u3040-\u30ff]")
-
-
 class AivisSpeechError(RuntimeError):
     """AivisSpeech 无法完成请求。"""
 
@@ -226,63 +227,10 @@ class MioGPTSoVITSError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class SpeechAudio:
-    wav_data: bytes
-    mouth_envelope: tuple[float, ...]
-    envelope_window_ms: int
-    spoken_text: str
-
-
-@dataclass(frozen=True)
 class _WarmupJob:
     """在正式语音之前加载本地模型，并在结束后继续其他启动任务。"""
 
     on_complete: object = None
-
-
-def prepare_spoken_text(text):
-    """去掉舞台动作和多余空白，只保留真正需要朗读的内容。"""
-    if not isinstance(text, str):
-        return ""
-    cleaned = _STAGE_DIRECTION_RE.sub("", text)
-    return " ".join(cleaned.split()).strip()
-
-
-def contains_japanese_kana(text):
-    return bool(_KANA_RE.search(text or ""))
-
-
-def split_sentences(text, maximum_chars=DEFAULT_AIVIS_MAX_CHARS):
-    """按日语/中文句末标点切分，过长句子再按逗号做软切分。"""
-    text = prepare_spoken_text(text)
-    if not text:
-        return []
-
-    sentences = []
-    for part in _SENTENCE_BOUNDARY_RE.split(text):
-        part = part.strip()
-        if not part:
-            continue
-        if len(part) <= maximum_chars:
-            sentences.append(part)
-            continue
-
-        current = ""
-        for piece in re.split(r"(?<=[、，,；;])", part):
-            if current and len(current) + len(piece) > maximum_chars:
-                sentences.append(current.strip())
-                current = ""
-            while len(piece) > maximum_chars:
-                available = maximum_chars - len(current)
-                current += piece[:available]
-                piece = piece[available:]
-                if current.strip():
-                    sentences.append(current.strip())
-                current = ""
-            current += piece
-        if current.strip():
-            sentences.append(current.strip())
-    return sentences
 
 
 class JapaneseSpeechTranslator:
@@ -820,102 +768,6 @@ class MioGPTSoVITSClient(MioStyleBertClient):
                 self.gpt_weights_path.name,
                 self.sovits_weights_path.name,
             )
-
-
-def build_mouth_envelope(wav_data, window_ms=33):
-    """从 PCM WAV 计算 0..1 的短时响度，供 Live2D 实际音频口型使用。"""
-    try:
-        import numpy as np
-
-        with wave.open(BytesIO(wav_data), "rb") as wav_file:
-            channels = wav_file.getnchannels()
-            sample_width = wav_file.getsampwidth()
-            sample_rate = wav_file.getframerate()
-            raw = wav_file.readframes(wav_file.getnframes())
-    except (ImportError, EOFError, wave.Error, ValueError):
-        return ()
-
-    dtype = {1: np.uint8, 2: np.int16, 4: np.int32}.get(sample_width)
-    if dtype is None or not raw:
-        return ()
-
-    samples = np.frombuffer(raw, dtype=dtype).astype(np.float64)
-    if sample_width == 1:
-        samples -= 128.0
-    if channels > 1:
-        usable = len(samples) - (len(samples) % channels)
-        samples = samples[:usable].reshape(-1, channels).mean(axis=1)
-
-    window_size = max(1, int(sample_rate * window_ms / 1000))
-    rms_values = []
-    full_scale = float(2 ** (sample_width * 8 - 1))
-    for start in range(0, len(samples), window_size):
-        chunk = samples[start:start + window_size]
-        if len(chunk):
-            rms_values.append(math.sqrt(float(np.mean(chunk * chunk))) / full_scale)
-    if not rms_values:
-        return ()
-
-    rms = np.asarray(rms_values)
-    floor = float(np.percentile(rms, 18))
-    ceiling = max(float(np.percentile(rms, 92)), floor + 1e-6)
-    normalized = np.clip((rms - floor) / (ceiling - floor), 0.0, 1.0)
-    # 嘴型比原始响度稍柔和，低声也保留可见开合。
-    shaped = np.sqrt(normalized) * 0.9
-    return tuple(float(value) for value in shaped)
-
-
-def combine_speech_audio(audio_batch, pause_ms=90):
-    """把一条回复的多个 PCM WAV 合成单一音频源，避免 Qt 分段切换卡死。"""
-    audio_batch = list(audio_batch or [])
-    if not audio_batch:
-        return None
-    if len(audio_batch) == 1:
-        return audio_batch[0]
-
-    decoded = []
-    reference = None
-    for audio in audio_batch:
-        try:
-            with wave.open(BytesIO(audio.wav_data), "rb") as wav_file:
-                params = (
-                    wav_file.getnchannels(),
-                    wav_file.getsampwidth(),
-                    wav_file.getframerate(),
-                    wav_file.getcomptype(),
-                    wav_file.getcompname(),
-                )
-                frames = wav_file.readframes(wav_file.getnframes())
-        except (EOFError, wave.Error) as exc:
-            raise AivisSpeechError(f"Invalid WAV returned by TTS backend: {exc}") from exc
-        if reference is None:
-            reference = params
-        elif params[:4] != reference[:4]:
-            raise AivisSpeechError("TTS backend returned incompatible WAV formats")
-        decoded.append(frames)
-
-    channels, sample_width, sample_rate, compression, compression_name = reference
-    pause_frames = max(0, int(sample_rate * max(0, pause_ms) / 1000))
-    silence_sample = b"\x80" if sample_width == 1 else b"\x00" * sample_width
-    silence = silence_sample * channels * pause_frames
-
-    output = BytesIO()
-    with wave.open(output, "wb") as wav_file:
-        wav_file.setnchannels(channels)
-        wav_file.setsampwidth(sample_width)
-        wav_file.setframerate(sample_rate)
-        wav_file.setcomptype(compression, compression_name)
-        for index, frames in enumerate(decoded):
-            if index:
-                wav_file.writeframesraw(silence)
-            wav_file.writeframesraw(frames)
-    wav_data = output.getvalue()
-    return SpeechAudio(
-        wav_data=wav_data,
-        mouth_envelope=build_mouth_envelope(wav_data),
-        envelope_window_ms=33,
-        spoken_text="".join(audio.spoken_text for audio in audio_batch),
-    )
 
 
 class SpeechSynthesisService:

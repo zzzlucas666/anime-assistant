@@ -40,13 +40,9 @@ import html
 import threading
 import datetime
 import copy
-from collections import deque
 
-from PySide6.QtCore import (
-    Qt, QThread, Signal, QObject, QTimer, QBuffer, QByteArray, QIODevice, QUrl,
-)
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QTextCursor, QKeyEvent, QSurfaceFormat
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QLineEdit, QPushButton, QLabel
@@ -74,24 +70,15 @@ from anime_assistant.conversation.orchestrator import ConversationOrchestrator
 from anime_assistant.proactive.initiative_engine import InitiativeEngine
 from anime_assistant.infrastructure.logging import get_logger
 from anime_assistant.live2d.controller import CharacterController
+from anime_assistant.live2d.canvas import LIVE2D_AVAILABLE, Live2DWidget, live2d
 from anime_assistant.live2d.model_utils import load_live2d_model_metadata, resolve_live2d_model_path
 from anime_assistant.live2d.parameter_tuner import Live2DParameterTuner
 from anime_assistant.memory.semantic_memory import warmup_model_async
-from anime_assistant.speech.service import SpeechAudio, SpeechSynthesisService
+from anime_assistant.speech.service import SpeechSynthesisService
+from anime_assistant.ui.playback import SpeechPlaybackController
+from anime_assistant.ui.workers import ChatWorker, ProactiveBridge, SpeechBridge
 
 logger = get_logger(__name__)
-
-# Live2D 相关依赖是可选的：装了 live2d-py + PyOpenGL 就显示角色立绘，
-# 没装也完全不影响聊天功能正常使用（优雅降级，而不是强制要求所有人
-# 都装这些额外依赖才能跑GUI）。
-try:
-    from PySide6.QtOpenGLWidgets import QOpenGLWidget
-    from OpenGL.GL import glViewport
-    import live2d.v3 as live2d
-    LIVE2D_AVAILABLE = True
-except ImportError as e:
-    LIVE2D_AVAILABLE = False
-    logger.info("未检测到 live2d-py / PyOpenGL，将不显示角色立绘（不影响聊天功能）：%s", e)
 
 # 当前 MIO 模型没有单独的 exp3 表情文件，所以使用参数预设做轻量表情。
 # 这些数值按 MIO 实际截图校准：它的眉毛角度/形变非常敏感，过大的组合会
@@ -212,270 +199,6 @@ def merge_emotion_map(default_map, config_map):
             merged[mood] = values
 
     return merged
-
-
-class ChatWorker(QThread):
-    """
-    在后台线程跑完整的一轮对话（prepare_turn -> stream_reply -> finalize_turn），
-    通过信号把结果安全地传回GUI主线程，避免长时间的AI调用卡住界面。
-    """
-
-    chunk_received = Signal(str)
-    turn_finished = Signal()
-    error_occurred = Signal(str)
-
-    def __init__(self, orchestrator, user_message):
-        super().__init__()
-        self.orchestrator = orchestrator
-        self.user_message = user_message
-
-    def run(self):
-        try:
-            prepared = self.orchestrator.prepare_turn(self.user_message)
-            raw_reply = ""
-            for chunk in self.orchestrator.stream_reply(prepared):
-                raw_reply += chunk
-                self.chunk_received.emit(chunk)
-            self.orchestrator.finalize_turn(prepared, raw_reply)
-        except Exception as e:
-            logger.error("GUI对话处理出错：%s", e)
-            self.error_occurred.emit(str(e))
-        finally:
-            self.turn_finished.emit()
-
-
-class ProactiveBridge(QObject):
-    """
-    一个轻量的 QObject，专门用来承接 InitiativeEngine 后台线程发来的主动消息。
-    InitiativeEngine 本身是普通的 threading.Thread，不是 Qt 线程，
-    但只要调用的是 QObject 的信号 emit()，Qt 会自动把它安全地路由到
-    这个 QObject 所属线程（这里是GUI主线程）的槽函数里执行，不需要自己加锁。
-    """
-    message_received = Signal(str)
-    state_updated = Signal()
-
-
-class SpeechBridge(QObject):
-    """把 TTS 后台线程生成的音频安全送回 Qt 主线程。"""
-
-    audio_ready = Signal(object)
-    error_occurred = Signal(str)
-    status_changed = Signal(str)
-
-
-class SpeechPlaybackController(QObject):
-    """在内存中顺序播放 WAV，并把实时响度送给角色控制器。"""
-
-    def __init__(self, character_controller, parent=None):
-        super().__init__(parent)
-        self.character_controller = character_controller
-        self.audio_output = QAudioOutput(self)
-        self.player = QMediaPlayer(self)
-        self.player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(1.0)
-        self.player.positionChanged.connect(self._on_position_changed)
-        self.player.mediaStatusChanged.connect(self._on_media_status_changed)
-        self.player.errorOccurred.connect(self._on_player_error)
-        self._queue = deque()
-        self._current = None
-        self._buffer = None
-        self._transition_pending = False
-
-    def enqueue(self, audio):
-        if not isinstance(audio, SpeechAudio) or not audio.wav_data:
-            return
-        self._queue.append(audio)
-        if self._current is None:
-            self._play_next()
-
-    def stop(self):
-        self._queue.clear()
-        self._transition_pending = False
-        self.player.stop()
-        self.player.setSource(QUrl())
-        self._release_current()
-        self.character_controller.on_audio_finished()
-
-    def _play_next(self):
-        self._transition_pending = False
-        if self._buffer is not None:
-            # 先让后端脱离旧设备，再于事件循环安全点释放 QBuffer。
-            self.player.setSource(QUrl())
-        self._release_current()
-        if not self._queue:
-            self.character_controller.on_audio_finished()
-            return
-
-        self._current = self._queue.popleft()
-        self._buffer = QBuffer(self)
-        self._buffer.setData(QByteArray(self._current.wav_data))
-        self._buffer.open(QIODevice.OpenModeFlag.ReadOnly)
-        self.character_controller.on_audio_started()
-        self.player.setSourceDevice(self._buffer, QUrl())
-        self.player.play()
-
-    def _on_position_changed(self, position_ms):
-        if self._current is None or not self._current.mouth_envelope:
-            return
-        index = int(position_ms // self._current.envelope_window_ms)
-        index = max(0, min(index, len(self._current.mouth_envelope) - 1))
-        self.character_controller.on_audio_amplitude(
-            self._current.mouth_envelope[index]
-        )
-
-    def _on_media_status_changed(self, status):
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._schedule_play_next()
-        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
-            logger.warning("Qt 无法播放 TTS 返回的音频，已跳过当前句")
-            self._schedule_play_next()
-
-    def _schedule_play_next(self):
-        """退出 QtMultimedia 状态回调后再切源，避免 FFmpeg 回调重入。"""
-        if self._transition_pending:
-            return
-        self._transition_pending = True
-        QTimer.singleShot(0, self._play_next)
-
-    def _on_player_error(self, _error, error_string):
-        if error_string:
-            logger.warning("TTS 音频播放失败：%s", error_string)
-
-    def _release_current(self):
-        self._current = None
-        if self._buffer is not None:
-            self._buffer.close()
-            self._buffer.deleteLater()
-            self._buffer = None
-
-
-if LIVE2D_AVAILABLE:
-    class Live2DWidget(QOpenGLWidget):
-        """
-        渲染 Live2D 角色立绘的画布。
-
-        加载逻辑是从独立验证脚本（test_live2d_load.py）里migrate过来的，
-        经过了非常仔细的排查才确认可用：关键是 live2d.glInit()（不是
-        live2d.glewInit()，那是个不存在的方法名，调用会抛AttributeError；
-        这个异常在Qt虚函数回调里如果不用try/except接住，会被静默吞掉，
-        表现得像是原生崩溃，实际只是个普通的Python异常）。
-        """
-
-        FRAME_INTERVAL_MS = 33  # 约30FPS；聊天立绘不需要60FPS，低一点能让回复显示更轻快
-
-        def __init__(self, model_path):
-            super().__init__()
-            self.model_path = model_path
-            self.model = None
-            self.load_failed = False
-            self.character_controller = None
-
-        def set_character_controller(self, controller):
-            self.character_controller = controller
-
-        def initializeGL(self):
-            try:
-                live2d.init()
-                live2d.glInit()
-
-                self.model = live2d.LAppModel()
-                self.model.LoadModelJson(self.model_path)
-                self.model.Resize(self.width(), self.height())
-                if self.character_controller:
-                    self.character_controller.refresh_current_expression()
-                logger.info("Live2D 模型加载成功：%s", self.model_path)
-            except Exception as e:
-                logger.error("Live2D 模型加载失败，立绘区域将保持空白：%s", e)
-                self.load_failed = True
-                self.model = None
-
-            # 启动持续重绘的定时器，驱动呼吸/物理摆动等待机动画
-            self._frame_timer = QTimer(self)
-            self._frame_timer.timeout.connect(self.update)
-            self._frame_timer.start(self.FRAME_INTERVAL_MS)
-
-        def resizeGL(self, w, h):
-            glViewport(0, 0, w, h)
-            if self.model:
-                self.model.Resize(w, h)
-
-        def paintGL(self):
-            live2d.clearBuffer()
-            if self.model:
-                self.model.Update()
-                if self.character_controller:
-                    self.character_controller.tick()
-                self.model.Draw()
-
-        def set_mouth_open(self, value):
-            if not self.model:
-                return
-            value = max(0.0, min(1.0, float(value)))
-            self._set_parameter("ParamMouthOpenY", value)
-
-        def set_parameters(self, parameters):
-            if not self.model or not isinstance(parameters, dict):
-                return
-
-            for param_id, value in parameters.items():
-                try:
-                    self._set_parameter(param_id, float(value))
-                except (TypeError, ValueError):
-                    logger.debug("Live2D 参数值不是数字，已跳过：%s=%s", param_id, value)
-
-        def set_expression(self, expression_name):
-            if not self.model or not expression_name:
-                return
-
-            for method_name in ("SetExpression", "setExpression"):
-                method = getattr(self.model, method_name, None)
-                if callable(method):
-                    try:
-                        method(expression_name)
-                        return
-                    except Exception as e:
-                        logger.debug("Live2D 表情切换失败 %s(%s)：%s", method_name, expression_name, e)
-
-        def start_motion(self, motion_group, index=0, priority=3):
-            if not self.model or not motion_group:
-                return
-
-            method = getattr(self.model, "StartMotion", None)
-            if not callable(method):
-                return
-
-            try:
-                method(motion_group, index, priority)
-            except Exception as e:
-                logger.debug("Live2D 动作触发失败 StartMotion(%s)：%s", motion_group, e)
-
-        def _set_parameter(self, param_id, value):
-            candidates = (
-                ("SetParameterValue", (param_id, value)),
-                ("SetParameterValue", (param_id, value, 1.0)),
-                ("SetParameterValueById", (param_id, value)),
-                ("SetParameterValueById", (param_id, value, 1.0)),
-                ("AddParameterValue", (param_id, value)),
-                ("AddParameterValue", (param_id, value, 1.0)),
-                ("AddParameterValueById", (param_id, value)),
-                ("AddParameterValueById", (param_id, value, 1.0)),
-            )
-
-            for method_name, args in candidates:
-                method = getattr(self.model, method_name, None)
-                if not callable(method):
-                    continue
-                try:
-                    method(*args)
-                    return True
-                except Exception:
-                    continue
-            return False
-
-        def closeEvent(self, event):
-            if hasattr(self, "_frame_timer"):
-                self._frame_timer.stop()
-            super().closeEvent(event)
 
 
 class MainWindow(QMainWindow):

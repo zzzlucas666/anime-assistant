@@ -4,6 +4,15 @@ import re
 from anime_assistant.infrastructure.storage import safe_load_json, safe_save_json
 from anime_assistant.infrastructure.paths import DATA_DIR
 from anime_assistant.infrastructure.models import ALLOWED_VOICE_STYLES, normalize_emotion
+from anime_assistant.emotion.signals import (
+    MODIFIER_DURATIONS,
+    MOOD_DURATIONS,
+    _base_turn_signal,
+    _set_modifier,
+    _set_primary,
+    _set_voice_style,
+    has_interaction_signal,
+)
 
 EMOTION_PATH = str(DATA_DIR / "emotion_state.json")
 
@@ -17,15 +26,6 @@ FATIGUE_ENTER_ENERGY = 25
 FATIGUE_EXIT_ENERGY = 35
 
 POSITIVE_MOODS = {"happy", "shy"}
-MOOD_DURATIONS = {"happy": 5, "shy": 3, "sad": 6}
-MODIFIER_DURATIONS = {
-    "worried": 3,
-    "touched": 2,
-    "curious": 1,
-    "surprised": 1,
-    "annoyed": 2,
-}
-
 AI_CONTROL_USER_MOODS = {
     "neutral", "happy", "sad", "anxious", "angry", "lonely",
     "bored", "stressed", "tired", "disappointed",
@@ -204,49 +204,6 @@ def _has_direct_affection(text):
         _contains_any(text, DIRECT_AFFECTION_MARKERS)
         or bool(DIRECT_AFFECTION_PATTERN.search(text))
     )
-
-
-def _base_turn_signal(reason="no_clear_signal"):
-    return {
-        "mood": "neutral",
-        "intensity": 0.0,
-        "duration_turns": 0,
-        "modifier": "none",
-        "modifier_strength": 0.0,
-        "modifier_duration_turns": 0,
-        "voice_style": "conversational",
-        "voice_style_strength": 0.4,
-        "user_mood": "neutral",
-        "user_intensity": 0.0,
-        "reset_primary": False,
-        "reason": reason,
-        "source": "user_input",
-        "confidence": 0.25,
-        "candidates": [],
-        "decision_source": "local_rules",
-    }
-
-
-def _set_primary(signal, mood, intensity, reason, duration=None):
-    # 后出现的明确 Mio 反应优先于之前“先回到平静再关心用户”的计划。
-    signal["reset_primary"] = False
-    signal["mood"] = mood
-    signal["intensity"] = intensity
-    signal["duration_turns"] = duration if duration is not None else MOOD_DURATIONS.get(mood, 0)
-    signal["reason"] = reason
-
-
-def _set_modifier(signal, modifier, intensity, duration=None):
-    signal["modifier"] = modifier
-    signal["modifier_strength"] = intensity
-    signal["modifier_duration_turns"] = (
-        duration if duration is not None else MODIFIER_DURATIONS.get(modifier, 1)
-    )
-
-
-def _set_voice_style(signal, voice_style, intensity=0.6):
-    signal["voice_style"] = voice_style
-    signal["voice_style_strength"] = max(0.0, min(1.0, float(intensity)))
 
 
 def _emotion_text(text):
@@ -724,18 +681,6 @@ def apply_ai_emotion_control(planned, control):
         "strength": strength,
     }
     return signal
-
-
-def has_interaction_signal(signal):
-    if not isinstance(signal, dict):
-        return False
-    return any((
-        signal.get("mood") not in (None, "neutral"),
-        signal.get("modifier") not in (None, "none"),
-        signal.get("voice_style") not in (None, ""),
-        signal.get("user_mood") not in (None, "neutral"),
-        bool(signal.get("reset_primary")),
-    ))
 
 
 def _event_signal(event):
