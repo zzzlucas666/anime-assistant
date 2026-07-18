@@ -1,11 +1,13 @@
 import unittest
 
 from emotion_manager import (
+    apply_ai_emotion_control,
     has_interaction_signal,
     infer_interaction_emotion,
     plan_greeting_emotion,
     plan_proactive_emotion,
     plan_turn_emotion,
+    score_turn_emotion_candidates,
     update_emotion,
 )
 
@@ -23,6 +25,38 @@ def emotion_state(mood="neutral", strength=0.0):
 
 
 class InteractionEmotionTests(unittest.TestCase):
+    def test_personal_compliment_keeps_shy_and_happy_candidates(self):
+        candidates = score_turn_emotion_candidates(
+            "感觉你好可爱",
+            emotion_state(),
+            {"affection": 30, "familiarity": 10},
+        )
+
+        reactions = {item["reaction"] for item in candidates}
+        self.assertIn("shy", reactions)
+        self.assertIn("happy", reactions)
+        self.assertEqual(candidates[0]["reaction"], "shy")
+
+    def test_close_happy_relationship_shifts_direct_affection_to_happy(self):
+        candidates = score_turn_emotion_candidates(
+            "我喜欢你",
+            emotion_state("happy", 0.7),
+            {"affection": 80, "familiarity": 70},
+        )
+
+        self.assertEqual(candidates[0]["reaction"], "happy")
+
+    def test_intensified_direct_affection_is_still_recognized(self):
+        signal = plan_turn_emotion(
+            "我真的很喜欢你",
+            emotion_state("happy", 0.7),
+            {"affection": 80, "familiarity": 70},
+        )
+
+        self.assertEqual(signal["mood"], "happy")
+        self.assertEqual(signal["modifier"], "touched")
+        self.assertEqual(signal["voice_style"], "warm")
+
     def test_user_sadness_becomes_concern_not_mio_sadness(self):
         signal = plan_turn_emotion("我今天很难过，什么都不想做")
 
@@ -113,6 +147,51 @@ class InteractionEmotionTests(unittest.TestCase):
         )
         self.assertEqual(signal["mood"], "happy")
         self.assertEqual(signal["modifier"], "touched")
+
+    def test_ai_control_can_calibrate_ambiguous_praise_to_happy(self):
+        planned = plan_turn_emotion(
+            "你好可爱",
+            emotion_state(),
+            {"affection": 30, "familiarity": 10},
+        )
+        calibrated = apply_ai_emotion_control(planned, {
+            "user_mood": "neutral",
+            "reaction": "happy",
+            "voice_style": "warm",
+            "strength": 0.72,
+            "confidence": 0.88,
+        })
+
+        self.assertEqual(calibrated["mood"], "happy")
+        self.assertEqual(calibrated["voice_style"], "warm")
+        self.assertEqual(calibrated["decision_source"], "hybrid_ai")
+
+    def test_ai_control_cannot_turn_strong_user_distress_cheerful(self):
+        planned = plan_turn_emotion("我今天真的很难过")
+        calibrated = apply_ai_emotion_control(planned, {
+            "user_mood": "sad",
+            "reaction": "happy",
+            "voice_style": "cheerful",
+            "strength": 0.9,
+            "confidence": 0.95,
+        })
+
+        self.assertEqual(calibrated["user_mood"], "sad")
+        self.assertEqual(calibrated["mood"], "neutral")
+        self.assertEqual(calibrated["modifier"], "worried")
+        self.assertEqual(calibrated["voice_style"], "concerned")
+
+    def test_low_confidence_ai_control_is_ignored(self):
+        planned = plan_turn_emotion("今天天气怎么样？")
+        calibrated = apply_ai_emotion_control(planned, {
+            "user_mood": "happy",
+            "reaction": "happy",
+            "voice_style": "excited",
+            "strength": 0.9,
+            "confidence": 0.4,
+        })
+
+        self.assertEqual(calibrated, planned)
 
 
 class EmotionTransitionTests(unittest.TestCase):

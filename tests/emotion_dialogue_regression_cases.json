@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "description": "Day25 固定对话回归集：锁定用户情绪、Mio 反应、表情和 TTS 语气之间的关键映射。",
+  "cases": [
+    {
+      "id": "sad_support_stays_gentle",
+      "user_message": "我今天真的很难过，感觉什么都做不好。",
+      "assistant_reply": "怎么了？如果你愿意说，我会好好听着。",
+      "control_tag": "<mio:sad|worried|reassuring|0.78|0.94>",
+      "expected": {
+        "user_mood": "sad",
+        "mood": "neutral",
+        "modifier": "worried",
+        "voice_style": "reassuring",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "exam_anxiety_uses_reassuring_voice",
+      "user_message": "我最近有点紧张，很担心明天的考试。",
+      "assistant_reply": "嗯，考试前会紧张很正常。先把今天能做的复习做好吧。",
+      "control_tag": "<mio:anxious|worried|reassuring|0.74|0.92>",
+      "expected": {
+        "user_mood": "anxious",
+        "mood": "neutral",
+        "modifier": "worried",
+        "voice_style": "reassuring",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "fatigue_does_not_make_mio_sad",
+      "user_message": "今天练习得好累，完全没精神了。",
+      "assistant_reply": "那就先休息一下吧，别太勉强自己。",
+      "control_tag": "<mio:tired|worried|reassuring|0.70|0.90>",
+      "expected": {
+        "user_mood": "tired",
+        "mood": "neutral",
+        "modifier": "worried",
+        "voice_style": "reassuring",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "personal_compliment_can_be_shy",
+      "user_message": "感觉你好可爱。",
+      "assistant_reply": "才、才不是……你别突然说这种话啊。",
+      "control_tag": "<mio:neutral|shy|bashful|0.76|0.91>",
+      "expected": {
+        "user_mood": "neutral",
+        "mood": "shy",
+        "modifier": "none",
+        "voice_style": "bashful",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "personal_compliment_can_be_accepted_happily",
+      "user_message": "你好可爱。",
+      "assistant_reply": "嗯……谢谢你这么说。",
+      "control_tag": "<mio:neutral|happy|warm|0.72|0.88>",
+      "expected": {
+        "user_mood": "neutral",
+        "mood": "happy",
+        "modifier": "none",
+        "voice_style": "warm",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "close_relationship_accepts_affection",
+      "user_message": "我真的很喜欢你。",
+      "assistant_reply": "嗯……谢谢。我听到这句话真的很开心。",
+      "initial_emotion": {
+        "mood": "happy",
+        "mood_strength": 0.7
+      },
+      "relationship": {
+        "affection": 80,
+        "familiarity": 70,
+        "trust": 70
+      },
+      "control_tag": "<mio:happy|happy|warm|0.78|0.93>",
+      "expected": {
+        "user_mood": "happy",
+        "mood": "happy",
+        "modifier": "touched",
+        "voice_style": "warm",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "ability_praise_uses_warm_confidence",
+      "user_message": "你今天贝斯弹得真好。",
+      "assistant_reply": "谢谢你。我还有要练的地方，不过听你这么说很开心。",
+      "control_tag": "<mio:happy|happy|warm|0.70|0.89>",
+      "expected": {
+        "user_mood": "happy",
+        "mood": "happy",
+        "modifier": "touched",
+        "voice_style": "warm",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "ordinary_preference_question_stays_conversational",
+      "user_message": "你觉得红茶和咖啡哪个好喝？",
+      "assistant_reply": "我比较喜欢红茶。咖啡对我来说有点苦。",
+      "control_tag": "<mio:neutral|neutral|conversational|0.42|0.82>",
+      "expected": {
+        "user_mood": "neutral",
+        "mood": "neutral",
+        "modifier": "none",
+        "voice_style": "conversational",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "surprising_good_news_uses_surprised_expression",
+      "user_message": "我刚刚居然拿到了一等奖！",
+      "assistant_reply": "诶，真的吗？很厉害啊，恭喜你！",
+      "control_tag": "<mio:happy|surprised|surprised|0.82|0.91>",
+      "expected": {
+        "user_mood": "happy",
+        "mood": "neutral",
+        "modifier": "surprised",
+        "voice_style": "surprised",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "directed_negative_words_keep_disappointed_reaction",
+      "user_message": "我有点讨厌你，你根本不懂我。",
+      "assistant_reply": "……对不起。我可能真的没有理解你的意思。",
+      "control_tag": "<mio:angry|annoyed|serious|0.78|0.90>",
+      "expected": {
+        "user_mood": "angry",
+        "mood": "sad",
+        "modifier": "worried",
+        "voice_style": "serious",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
+      "id": "distress_rejects_cheerful_ai_override",
+      "user_message": "我今天真的很难过。",
+      "assistant_reply": "我会陪你聊一会儿的。",
+      "control_tag": "<mio:sad|happy|cheerful|0.90|0.95>",
+      "expected": {
+        "user_mood": "sad",
+        "mood": "neutral",
+        "modifier": "worried",
+        "voice_style": "concerned",
+        "decision_source": "hybrid_ai"
+      }
+    }
+  ]
+}

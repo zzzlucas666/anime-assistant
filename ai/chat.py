@@ -5,9 +5,108 @@ from ai.client import create_ai_client
 from ai.fallbacks import FALLBACK_REPLIES
 from app_paths import DATA_DIR
 from context_builder import build_memory_context
+from data_models import ALLOWED_VOICE_STYLES
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
+
+EMOTION_CONTROL_PREFIX = "<mio:"
+EMOTION_CONTROL_USER_MOODS = {
+    "neutral", "happy", "sad", "anxious", "angry", "lonely",
+    "bored", "stressed", "tired", "disappointed",
+}
+EMOTION_CONTROL_REACTIONS = {
+    "neutral", "happy", "shy", "sad", "worried", "touched",
+    "curious", "surprised", "annoyed",
+}
+EMOTION_CONTROL_PATTERN = re.compile(
+    r"<mio:([a-z_]+)\|([a-z_]+)\|([a-z_]+)\|"
+    r"([01](?:\.\d+)?)\|([01](?:\.\d+)?)>"
+)
+
+
+def parse_emotion_control_tag(tag):
+    """解析主回复末尾的内部控制标签；无效标签不会进入情绪系统。"""
+    if not isinstance(tag, str):
+        return None
+    match = EMOTION_CONTROL_PATTERN.fullmatch(tag.strip().lower())
+    if not match:
+        return None
+    user_mood, reaction, voice_style, strength_text, confidence_text = match.groups()
+    if (
+        user_mood not in EMOTION_CONTROL_USER_MOODS
+        or reaction not in EMOTION_CONTROL_REACTIONS
+        or voice_style not in ALLOWED_VOICE_STYLES
+    ):
+        return None
+    strength = float(strength_text)
+    confidence = float(confidence_text)
+    if not (0.0 <= strength <= 1.0 and 0.0 <= confidence <= 1.0):
+        return None
+    return {
+        "user_mood": user_mood,
+        "reaction": reaction,
+        "voice_style": voice_style,
+        "strength": strength,
+        "confidence": confidence,
+    }
+
+
+class EmotionControlStreamFilter:
+    """跨流式分块隐藏控制标签，避免它闪到 GUI 或被 TTS 读出。"""
+    def __init__(self):
+        self._pending = ""
+        self._hidden = ""
+        self._hiding = False
+        self.control = None
+
+    @property
+    def saw_control_prefix(self):
+        return self._hiding
+
+    def _consume_hidden(self, text):
+        self._hidden += text
+        end_index = self._hidden.find(">")
+        if end_index >= 0 and self.control is None:
+            self.control = parse_emotion_control_tag(self._hidden[:end_index + 1])
+
+    def feed(self, text):
+        if not isinstance(text, str) or not text:
+            return ""
+        if self._hiding:
+            self._consume_hidden(text)
+            return ""
+
+        self._pending += text
+        marker_index = self._pending.find(EMOTION_CONTROL_PREFIX)
+        if marker_index >= 0:
+            visible = self._pending[:marker_index]
+            hidden = self._pending[marker_index:]
+            self._pending = ""
+            self._hiding = True
+            self._consume_hidden(hidden)
+            return visible
+
+        overlap = 0
+        max_overlap = min(len(self._pending), len(EMOTION_CONTROL_PREFIX) - 1)
+        for size in range(max_overlap, 0, -1):
+            if self._pending.endswith(EMOTION_CONTROL_PREFIX[:size]):
+                overlap = size
+                break
+        if overlap:
+            visible = self._pending[:-overlap]
+            self._pending = self._pending[-overlap:]
+        else:
+            visible = self._pending
+            self._pending = ""
+        return visible
+
+    def finish(self):
+        if self._hiding:
+            return ""
+        visible = self._pending
+        self._pending = ""
+        return visible
 
 def load_persona():
     with open(DATA_DIR / "persona.json", "r", encoding="utf-8") as f:
@@ -142,7 +241,7 @@ def build_turn_emotion_hint(turn_emotion):
     )
 
 
-def build_system_prompt(context, query_text=None):
+def build_system_prompt(context, query_text=None, include_emotion_control=True):
     """
     query_text: 当前这轮用户说的话，传给 context_builder 做语义检索，
                 找出跟当前话题相关的过往事件。生成开场白/主动消息时可能没有
@@ -157,6 +256,20 @@ def build_system_prompt(context, query_text=None):
     memory_context = build_memory_context(query_text=query_text)
     event_memory_hint = memory_context["event_memory_hint"]
     long_term_summary_hint = memory_context["long_term_summary_hint"]
+    emotion_control_instruction = ""
+    if include_emotion_control:
+        emotion_control_instruction = """
+# 【内部情绪控制标签（必须输出，用户不可见）】
+在自然回复的最后一个字后立刻追加且只追加一个标签：
+<mio:USER_MOOD|REACTION|VOICE_STYLE|STRENGTH|CONFIDENCE>
+- USER_MOOD 只能选 neutral/happy/sad/anxious/angry/lonely/bored/stressed/tired/disappointed
+- REACTION 是 Mio 自己本轮的反应，只能选 neutral/happy/shy/sad/worried/touched/curious/surprised/annoyed
+- VOICE_STYLE 只能选 conversational/thoughtful/warm/cheerful/excited/bashful/embarrassed/concerned/reassuring/curious/surprised/mild_annoyed/serious/disappointed/tired
+- STRENGTH 和 CONFIDENCE 都是 0.00~1.00
+- 用户难过、焦虑或疲惫时，通常是 Mio worried 并使用 concerned/reassuring，而不是把 Mio 自己判断成 sad
+- 标签前不要换行，标签内不要空格，不要解释标签，也不要用代码块包裹
+示例：嗯，别太勉强自己。累了就先休息一下吧。<mio:tired|worried|reassuring|0.72|0.86>
+"""
 
     return f"""
 你现在扮演的角色是：{persona['name']}。
@@ -310,6 +423,8 @@ def build_system_prompt(context, query_text=None):
 发送前检查一次：如果这只是日常闲聊，却超过 2 句或明显超过 55 个汉字，
 请删掉动作括号、景色、比喻、虚构细节、无关音乐元素和不必要的追问，
 改成一个真实女高中生会在聊天框里发出的简短口语。
+
+{emotion_control_instruction}
 """
 
 def _extract_latest_user_message(messages):
@@ -371,7 +486,7 @@ def _create_stream(messages, context):
         model=context["config"]["model"],
         messages=full_messages,
         stream=True,
-        max_tokens=72,
+        max_tokens=112,
     )
 
     stream = client.chat.completions.create(**request_options)
@@ -384,7 +499,7 @@ def _create_stream(messages, context):
     return stream
 
 
-def chat_with_ai_stream(messages, context):
+def chat_with_ai_stream(messages, context, on_emotion_control=None):
     """
     流式调用 AI，逐块 yield 文本片段。
 
@@ -407,6 +522,7 @@ def chat_with_ai_stream(messages, context):
             continue
 
         has_yielded_any = False
+        control_filter = EmotionControlStreamFilter()
         reasoning_chars = 0
         finish_reasons = []
         try:
@@ -421,21 +537,47 @@ def chat_with_ai_stream(messages, context):
                 if choice.finish_reason:
                     finish_reasons.append(choice.finish_reason)
                 if delta and delta.content:
-                    has_yielded_any = True
-                    yield delta.content
+                    visible = control_filter.feed(delta.content)
+                    if visible:
+                        has_yielded_any = True
+                        yield visible
         except Exception as e:
             last_error = e
             logger.warning("流式输出中途中断（第 %d 次尝试）：%s", attempt + 1, e)
+            tail = control_filter.finish()
+            if tail:
+                has_yielded_any = True
+                yield tail
             if has_yielded_any:
+                if control_filter.control and callable(on_emotion_control):
+                    try:
+                        on_emotion_control(control_filter.control)
+                    except Exception as callback_error:
+                        logger.warning("提交回复情绪控制信息失败：%s", callback_error)
+                if control_filter.saw_control_prefix:
+                    # 可见回复已经完整，只是末尾内部标签被截断，不给用户
+                    # 追加“网络卡顿”之类无关话术，直接回退本地情绪计划。
+                    return
                 # 已经说了一部分话，不重试（避免重复），自然收个尾
                 yield "…呃，网络突然卡了一下，先这样吧。"
                 return
             continue
 
+        tail = control_filter.finish()
+        if tail:
+            has_yielded_any = True
+            yield tail
+        if control_filter.control and callable(on_emotion_control):
+            try:
+                on_emotion_control(control_filter.control)
+            except Exception as e:
+                logger.warning("提交回复情绪控制信息失败：%s", e)
+
         logger.info(
-            "对话流完成：attempt=%d content=%s reasoning_chars=%d finish=%s",
+            "对话流完成：attempt=%d content=%s emotion_control=%s reasoning_chars=%d finish=%s",
             attempt + 1,
             has_yielded_any,
+            control_filter.control is not None,
             reasoning_chars,
             finish_reasons or ["unknown"],
         )
@@ -547,7 +689,11 @@ def generate_proactive_message(context, reason_hint):
     """
     import random
 
-    system_prompt = build_system_prompt(context, query_text=reason_hint)
+    system_prompt = build_system_prompt(
+        context,
+        query_text=reason_hint,
+        include_emotion_control=False,
+    )
     user_display_name = get_user_display_name(context.get("profile"))
 
     special_instruction = f"""

@@ -26,6 +26,19 @@ MODIFIER_DURATIONS = {
     "annoyed": 2,
 }
 
+AI_CONTROL_USER_MOODS = {
+    "neutral", "happy", "sad", "anxious", "angry", "lonely",
+    "bored", "stressed", "tired", "disappointed",
+}
+AI_CONTROL_REACTIONS = {
+    "neutral", "happy", "shy", "sad", "worried", "touched",
+    "curious", "surprised", "annoyed",
+}
+DISTRESS_USER_MOODS = {
+    "sad", "anxious", "angry", "lonely", "stressed", "tired", "disappointed",
+}
+SUPPORT_VOICE_STYLES = {"concerned", "reassuring", "serious", "thoughtful"}
+
 PERSONAL_COMPLIMENT_MARKERS = (
     "你好可爱", "你很可爱", "真可爱", "太可爱", "觉得你可爱",
     "你好漂亮", "你很漂亮", "真漂亮", "太漂亮", "觉得你漂亮",
@@ -42,6 +55,9 @@ GENERAL_PRAISE_MARKERS = (
     "真棒", "太棒", "很棒", "干得好", "表现很好", "表现不错", "值得夸",
 )
 DIRECT_AFFECTION_MARKERS = ("我喜欢你", "最喜欢你", "我爱你", "对你心动")
+DIRECT_AFFECTION_PATTERN = re.compile(
+    r"我(?:真的|真|一直|还是|越来越)?(?:很|非常|特别|最)?喜欢你"
+)
 CARE_MARKERS = ("辛苦了", "谢谢你陪", "谢谢你一直", "有你真好", "我会陪你", "别勉强自己")
 USER_SAD_MARKERS = (
     "我好难过", "我很难过", "我不开心", "我很伤心", "我想哭",
@@ -176,6 +192,20 @@ def _contains_any(text, markers):
     return any(marker in text for marker in markers)
 
 
+def _has_personal_compliment(text):
+    return (
+        _contains_any(text, PERSONAL_COMPLIMENT_MARKERS)
+        or bool(DIRECT_AFFECTION_PATTERN.search(text))
+    )
+
+
+def _has_direct_affection(text):
+    return (
+        _contains_any(text, DIRECT_AFFECTION_MARKERS)
+        or bool(DIRECT_AFFECTION_PATTERN.search(text))
+    )
+
+
 def _base_turn_signal(reason="no_clear_signal"):
     return {
         "mood": "neutral",
@@ -191,6 +221,9 @@ def _base_turn_signal(reason="no_clear_signal"):
         "reset_primary": False,
         "reason": reason,
         "source": "user_input",
+        "confidence": 0.25,
+        "candidates": [],
+        "decision_source": "local_rules",
     }
 
 
@@ -221,19 +254,117 @@ def _emotion_text(text):
     return NEGATED_EMOTION_PATTERN.sub("", text)
 
 
-def plan_turn_emotion(user_message, emotion=None, relationship=None):
-    """在生成回复前规划本轮反应，不依赖 Mio 自己即将生成的措辞。"""
+def _candidate(reaction, voice_style, score, reason, user_mood="neutral"):
+    return {
+        "reaction": reaction,
+        "voice_style": voice_style,
+        "score": round(max(0.0, min(1.0, float(score))), 3),
+        "reason": reason,
+        "user_mood": user_mood,
+    }
+
+
+def score_turn_emotion_candidates(user_message, emotion=None, relationship=None):
+    """给本轮生成多个轻量候选；只做本地计算，不增加网络请求。"""
     text = user_message if isinstance(user_message, str) else ""
     emotional_text = _emotion_text(text)
     state = normalize_emotion(emotion)
     relationship = relationship if isinstance(relationship, dict) else {}
     affection = float(relationship.get("affection", 30) or 30)
     familiarity = float(relationship.get("familiarity", 10) or 10)
+    candidates = []
+
+    def add(reaction, voice_style, score, reason, user_mood="neutral"):
+        candidates.append(_candidate(
+            reaction, voice_style, score, reason, user_mood=user_mood
+        ))
+
+    if _contains_any(emotional_text, USER_SAD_MARKERS) or USER_SAD_PATTERN.search(emotional_text):
+        add("worried", "concerned", 0.94, "user_is_sad", "sad")
+        add("worried", "reassuring", 0.72, "gentle_support", "sad")
+    if _contains_any(emotional_text, USER_LONELY_MARKERS):
+        add("worried", "concerned", 0.91, "user_is_lonely", "lonely")
+        add("touched", "warm", 0.62, "offer_company", "lonely")
+    if _contains_any(emotional_text, USER_ANXIOUS_MARKERS) or USER_ANXIOUS_PATTERN.search(emotional_text):
+        add("worried", "reassuring", 0.92, "user_is_anxious", "anxious")
+        add("worried", "concerned", 0.73, "anxious_support", "anxious")
+    if _contains_any(emotional_text, USER_STRESSED_MARKERS):
+        add("worried", "reassuring", 0.85, "user_is_stressed", "stressed")
+        add("neutral", "thoughtful", 0.58, "practical_support", "stressed")
+    if _contains_any(emotional_text, USER_DISAPPOINTED_MARKERS):
+        add("worried", "concerned", 0.89, "user_is_disappointed", "disappointed")
+        add("worried", "reassuring", 0.68, "encourage_after_setback", "disappointed")
+    if _contains_any(emotional_text, USER_TIRED_MARKERS):
+        add("worried", "reassuring", 0.84, "user_is_tired", "tired")
+        add("neutral", "warm", 0.57, "gentle_rest_reminder", "tired")
+    if _contains_any(emotional_text, USER_BORED_MARKERS):
+        add("neutral", "thoughtful", 0.78, "user_is_bored", "bored")
+        add("curious", "conversational", 0.52, "explore_boredom", "bored")
+    if _contains_any(emotional_text, USER_ANGRY_MARKERS) or USER_ANGRY_PATTERN.search(emotional_text):
+        add("worried", "serious", 0.87, "user_is_angry", "angry")
+        add("worried", "concerned", 0.64, "calm_user_anger", "angry")
+    if _contains_any(emotional_text, USER_HAPPY_MARKERS) or USER_HAPPY_PATTERN.search(emotional_text):
+        add("happy", "cheerful", 0.88, "sharing_user_happiness", "happy")
+        add("touched", "warm", 0.61, "share_good_news", "happy")
+
+    if _contains_any(text, DIRECTED_NEGATIVE_MARKERS):
+        add("sad", "disappointed", 0.95, "negative_words_toward_mio", "angry")
+    elif _has_personal_compliment(text):
+        closeness = max(0.0, min(1.0, (affection + familiarity - 60.0) / 100.0))
+        direct_affection = _has_direct_affection(text)
+        happy_bonus = 0.10 * closeness
+        if state.get("mood") == "happy":
+            happy_bonus += 0.08
+        if direct_affection and affection >= 65 and familiarity >= 55:
+            happy_bonus += 0.12
+        shy_score = 0.84 - 0.13 * closeness - (0.05 if state.get("mood") == "happy" else 0.0)
+        happy_score = 0.63 + happy_bonus
+        add("shy", "bashful", shy_score, "personal_compliment")
+        add("happy", "warm", happy_score, "accept_personal_compliment")
+    elif _contains_any(text, ABILITY_COMPLIMENT_MARKERS):
+        add("happy", "warm", 0.84, "ability_compliment")
+        add("shy", "bashful", 0.58, "modest_about_ability")
+    elif _contains_any(text, GENERAL_PRAISE_MARKERS):
+        add("happy", "cheerful", 0.76, "general_praise")
+        add("touched", "warm", 0.55, "appreciate_praise")
+    elif _contains_any(text, CARE_MARKERS):
+        add("touched", "warm", 0.86, "care_from_user")
+        add("happy", "warm", 0.66, "happy_about_care")
+    elif _contains_any(text, ANNOYED_MARKERS):
+        add("annoyed", "mild_annoyed", 0.78, "light_teasing")
+        add("neutral", "conversational", 0.45, "take_teasing_lightly")
+    elif _contains_any(text, SURPRISE_MARKERS):
+        add("surprised", "surprised", 0.8, "surprising_information")
+        add("curious", "curious", 0.56, "follow_surprise")
+
+    if _contains_any(text, ADVICE_MARKERS):
+        add("neutral", "thoughtful", 0.66, "advice_request")
+    elif "?" in text or "？" in text or _contains_any(text, QUESTION_MARKERS):
+        add("neutral", "conversational", 0.46, "ordinary_question")
+
+    if not candidates:
+        add("neutral", "conversational", 0.3, "no_clear_signal")
+
+    deduplicated = {}
+    for item in candidates:
+        key = (item["reaction"], item["voice_style"], item["user_mood"])
+        if key not in deduplicated or item["score"] > deduplicated[key]["score"]:
+            deduplicated[key] = item
+    return sorted(deduplicated.values(), key=lambda item: item["score"], reverse=True)
+
+
+def plan_turn_emotion(user_message, emotion=None, relationship=None):
+    """在生成回复前规划本轮反应，不依赖 Mio 自己即将生成的措辞。"""
+    text = user_message if isinstance(user_message, str) else ""
+    emotional_text = _emotion_text(text)
+    state = normalize_emotion(emotion)
+    relationship = relationship if isinstance(relationship, dict) else {}
     signal = _base_turn_signal()
 
-    personal_praise = _contains_any(text, PERSONAL_COMPLIMENT_MARKERS)
+    personal_praise = _has_personal_compliment(text)
     ability_praise = _contains_any(text, ABILITY_COMPLIMENT_MARKERS)
     general_praise = _contains_any(text, GENERAL_PRAISE_MARKERS)
+    candidates = score_turn_emotion_candidates(text, state, relationship)
 
     user_needs_support = False
     if _contains_any(emotional_text, USER_SAD_MARKERS) or USER_SAD_PATTERN.search(emotional_text):
@@ -317,10 +448,13 @@ def plan_turn_emotion(user_message, emotion=None, relationship=None):
         # 问句或玩笑把 Mio 的反应抢走。
         pass
     elif personal_praise:
-        # 关系足够亲近且本来就在开心时，更可能坦然高兴；其他情况下保留
-        # Mio 对直接夸奖的害羞反应。回复完成后还会根据实际措辞做一次校准。
-        accepts_warmly = affection >= 65 and familiarity >= 55 and state.get("mood") == "happy"
-        if accepts_warmly and _contains_any(text, DIRECT_AFFECTION_MARKERS):
+        # 同时保留“害羞”和“开心”两种候选。关系、当前心情和夸奖类型只
+        # 调整概率，不再用一个硬阈值把所有夸奖都固定成同一种反应。
+        praise_choice = next(
+            (item for item in candidates if item["reaction"] in {"shy", "happy"}),
+            {"reaction": "shy"},
+        )
+        if praise_choice["reaction"] == "happy":
             _set_primary(signal, "happy", 0.72, "warm_personal_compliment", 4)
             _set_modifier(signal, "touched", 0.58, 2)
             _set_voice_style(signal, "warm", 0.74)
@@ -354,6 +488,9 @@ def plan_turn_emotion(user_message, emotion=None, relationship=None):
         _set_voice_style(signal, "conversational", 0.45)
         signal["reason"] = "ordinary_question"
 
+    signal["candidates"] = candidates[:4]
+    signal["confidence"] = candidates[0]["score"] if candidates else 0.25
+    signal["decision_source"] = "local_candidates"
     return signal
 
 
@@ -472,7 +609,7 @@ def infer_interaction_emotion(user_message, ai_reply, relationship=None, planned
     text = user_message if isinstance(user_message, str) else ""
     reply_text = ai_reply if isinstance(ai_reply, str) else ""
     is_praise = (
-        _contains_any(text, PERSONAL_COMPLIMENT_MARKERS)
+        _has_personal_compliment(text)
         or _contains_any(text, ABILITY_COMPLIMENT_MARKERS)
         or _contains_any(text, GENERAL_PRAISE_MARKERS)
     )
@@ -496,9 +633,96 @@ def infer_interaction_emotion(user_message, ai_reply, relationship=None, planned
         _set_primary(signal, "happy", 0.7, "accepted_compliment", 4)
         _set_voice_style(
             signal,
-            "warm" if _contains_any(text, PERSONAL_COMPLIMENT_MARKERS) else "cheerful",
+            "warm" if _has_personal_compliment(text) else "cheerful",
             0.7,
         )
+    return signal
+
+
+def _bounded_probability(value, default=0.0):
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def apply_ai_emotion_control(planned, control):
+    """用主回复附带的控制信息校准本轮反应；异常时原样回退本地计划。"""
+    signal = dict(planned) if isinstance(planned, dict) else _base_turn_signal()
+    if not isinstance(control, dict):
+        return signal
+
+    user_mood = str(control.get("user_mood", "neutral") or "neutral")
+    reaction = str(control.get("reaction", "neutral") or "neutral")
+    voice_style = str(control.get("voice_style", "conversational") or "conversational")
+    strength = _bounded_probability(control.get("strength"), 0.5)
+    ai_confidence = _bounded_probability(control.get("confidence"), 0.0)
+    if (
+        ai_confidence < 0.55
+        or user_mood not in AI_CONTROL_USER_MOODS
+        or reaction not in AI_CONTROL_REACTIONS
+        or voice_style not in ALLOWED_VOICE_STYLES
+    ):
+        return signal
+
+    local_confidence = _bounded_probability(signal.get("confidence"), 0.25)
+    local_user_mood = str(signal.get("user_mood", "neutral") or "neutral")
+    local_reason = str(signal.get("reason", "") or "")
+    strong_support = (
+        local_user_mood in DISTRESS_USER_MOODS
+        and local_confidence >= 0.72
+        and local_reason != "negative_words_toward_mio"
+    )
+    strong_directed_negative = (
+        local_reason == "negative_words_toward_mio" and local_confidence >= 0.72
+    )
+
+    # 明确的求助/低落信号不能被模型误校准成开心或害羞；对 Mio 的直接
+    # 负面话语也保留本地的失落反应。AI 在这些场景只可细化同方向语气。
+    if strong_directed_negative:
+        if voice_style in {"disappointed", "serious"}:
+            _set_voice_style(signal, voice_style, strength)
+    elif strong_support:
+        if reaction == "worried":
+            _set_modifier(signal, "worried", max(0.5, strength), 3)
+        if voice_style in SUPPORT_VOICE_STYLES:
+            _set_voice_style(signal, voice_style, strength)
+    else:
+        if user_mood != "neutral" and (
+            local_user_mood == "neutral" or ai_confidence > local_confidence + 0.08
+        ):
+            signal["user_mood"] = user_mood
+            signal["user_intensity"] = max(0.35, strength)
+            if user_mood in DISTRESS_USER_MOODS:
+                signal["reset_primary"] = True
+
+        if user_mood in DISTRESS_USER_MOODS:
+            if reaction == "worried":
+                _set_modifier(signal, "worried", max(0.45, strength), 3)
+            if voice_style in SUPPORT_VOICE_STYLES:
+                _set_voice_style(signal, voice_style, strength)
+        elif reaction in {"happy", "shy", "sad"}:
+            _set_primary(
+                signal,
+                reaction,
+                max(0.35, strength),
+                f"ai_calibrated_{reaction}",
+            )
+        elif reaction in {"worried", "touched", "curious", "surprised", "annoyed"}:
+            _set_modifier(signal, reaction, max(0.3, strength))
+            signal["reason"] = f"ai_calibrated_{reaction}"
+
+        if user_mood not in DISTRESS_USER_MOODS:
+            _set_voice_style(signal, voice_style, strength)
+
+    signal["decision_source"] = "hybrid_ai"
+    signal["ai_confidence"] = ai_confidence
+    signal["ai_control"] = {
+        "user_mood": user_mood,
+        "reaction": reaction,
+        "voice_style": voice_style,
+        "strength": strength,
+    }
     return signal
 
 

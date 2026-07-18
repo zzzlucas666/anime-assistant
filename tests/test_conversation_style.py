@@ -110,6 +110,27 @@ class ConversationStylePromptTests(unittest.TestCase):
         self.assertIn("不要主动提贝斯", prompt)
         self.assertIn("历史内容只用于记住", prompt)
         self.assertIn("喜欢什么样的人", prompt)
+        self.assertIn("<mio:USER_MOOD|REACTION|VOICE_STYLE|STRENGTH|CONFIDENCE>", prompt)
+        self.assertIn("用户难过、焦虑或疲惫时", prompt)
+
+    def test_proactive_prompt_can_disable_interactive_control_tag(self):
+        context = {
+            "profile": {"name": "", "nickname": "", "likes": [], "dislikes": []},
+            "emotion": {"mood": "neutral", "energy": 80},
+            "relationship": {"affection": 30, "trust": 30, "familiarity": 10},
+        }
+        memory = {
+            "event_memory_hint": "无",
+            "long_term_summary_hint": "无",
+        }
+        with patch("ai.chat.build_memory_context", return_value=memory):
+            prompt = chat.build_system_prompt(
+                context,
+                "主动找用户聊天",
+                include_emotion_control=False,
+            )
+
+        self.assertNotIn("<mio:USER_MOOD|REACTION|VOICE_STYLE", prompt)
 
     def test_chat_request_has_bounded_output_budget(self):
         client = Mock()
@@ -131,7 +152,7 @@ class ConversationStylePromptTests(unittest.TestCase):
             )
 
         kwargs = client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs["max_tokens"], 72)
+        self.assertEqual(kwargs["max_tokens"], 112)
         self.assertTrue(kwargs["stream"])
         self.assertNotIn("extra_body", kwargs)
 
@@ -222,6 +243,55 @@ class EmptyStreamRecoveryTests(unittest.TestCase):
 
         self.assertEqual(result, [fallback])
         self.assertEqual(create_stream.call_count, 2)
+
+    def test_hidden_emotion_tag_is_filtered_across_stream_chunks(self):
+        chunks = [
+            self._content_chunk("嗯，会有一点。不过熟悉以后会好些。<mi"),
+            self._content_chunk("o:neutral|shy|bashful|0.72|0.86"),
+            self._content_chunk(">"),
+        ]
+        controls = []
+
+        with patch("ai.chat._create_stream", return_value=chunks):
+            result = list(chat.chat_with_ai_stream(
+                [], {}, on_emotion_control=controls.append
+            ))
+
+        self.assertEqual("".join(result), "嗯，会有一点。不过熟悉以后会好些。")
+        self.assertNotIn("<mio:", "".join(result))
+        self.assertEqual(controls, [{
+            "user_mood": "neutral",
+            "reaction": "shy",
+            "voice_style": "bashful",
+            "strength": 0.72,
+            "confidence": 0.86,
+        }])
+
+    def test_missing_control_tag_keeps_visible_reply_unchanged(self):
+        chunks = [self._content_chunk("普通回复末尾刚好有<mi字样")]
+        controls = []
+
+        with patch("ai.chat._create_stream", return_value=chunks):
+            result = list(chat.chat_with_ai_stream(
+                [], {}, on_emotion_control=controls.append
+            ))
+
+        self.assertEqual("".join(result), "普通回复末尾刚好有<mi字样")
+        self.assertEqual(controls, [])
+
+    def test_invalid_control_tag_is_hidden_and_ignored(self):
+        chunks = [self._content_chunk(
+            "回复。<mio:neutral|dancing|loud|0.9|0.9>"
+        )]
+        controls = []
+
+        with patch("ai.chat._create_stream", return_value=chunks):
+            result = list(chat.chat_with_ai_stream(
+                [], {}, on_emotion_control=controls.append
+            ))
+
+        self.assertEqual("".join(result), "回复。")
+        self.assertEqual(controls, [])
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from profile_extractor import extract_profile_info
 from router import handle_intent
 from ai.chat import chat_with_ai_stream
 from emotion_manager import (
+    apply_ai_emotion_control,
     has_interaction_signal,
     infer_interaction_emotion,
     plan_turn_emotion,
@@ -45,6 +46,7 @@ logger = get_logger(__name__)
 
 def clean_reply(reply):
     reply = re.sub(r'（.*?）', '', reply)
+    reply = re.sub(r'<mio:[^>]*>', '', reply, flags=re.IGNORECASE)
     return reply.strip()
 
 
@@ -246,10 +248,14 @@ class ConversationOrchestrator:
             yield router_reply
             return
 
+        def capture_emotion_control(control):
+            prepared["ai_emotion_control"] = copy.deepcopy(control)
+
         try:
             for chunk in chat_with_ai_stream(
                 prepared["conversation_snapshot"],
-                prepared["context_snapshot"]
+                prepared["context_snapshot"],
+                on_emotion_control=capture_emotion_control,
             ):
                 if first_chunk_at is None:
                     first_chunk_at = time.perf_counter()
@@ -298,6 +304,21 @@ class ConversationOrchestrator:
                 relationship=self.relationship,
                 planned=prepared.get("turn_emotion"),
             )
+            interaction_emotion = apply_ai_emotion_control(
+                interaction_emotion,
+                prepared.get("ai_emotion_control"),
+            )
+        logger.info(
+            "本轮情绪决策 source=%s reason=%s user=%s mood=%s modifier=%s voice=%s local_conf=%.2f ai_conf=%.2f",
+            interaction_emotion.get("decision_source", "local"),
+            interaction_emotion.get("reason", "unknown"),
+            interaction_emotion.get("user_mood", "neutral"),
+            interaction_emotion.get("mood", "neutral"),
+            interaction_emotion.get("modifier", "none"),
+            interaction_emotion.get("voice_style", "conversational"),
+            float(interaction_emotion.get("confidence", 0.0) or 0.0),
+            float(interaction_emotion.get("ai_confidence", 0.0) or 0.0),
+        )
         immediate_emotion_applied = has_interaction_signal(interaction_emotion)
 
         with self.lock:
