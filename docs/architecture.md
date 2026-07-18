@@ -3,25 +3,40 @@
 ## 分层
 
 ```text
-main.py / main_gui.py
+main.py / main_gui.py（兼容入口）
         │
-        ├─ ConversationOrchestrator ── 正常对话流程
-        └─ InitiativeEngine       ── 后台主动对话
+        ├─ anime_assistant.console
+        └─ anime_assistant.ui.main_window
                     │
-        ┌──────────┼──────────┐
-        │          │          │
-      ai/       domain managers   context/memory
-        │          │          │
-        └──── Storage_utils / local JSON
+        ┌───────────┼────────────┐
+        │           │            │
+ conversation/   proactive/   character + emotion
+        │           │            │
+        ├──────── memory/ ────────┤
+        │           │            │
+       ai/       speech/       live2d/
+        └───────────┬────────────┘
+                infrastructure/
 ```
 
-- **入口层**：`main.py` 负责控制台交互，`main_gui.py` 负责 Qt 界面、Live2D 和跨线程信号。
-- **应用层**：`ConversationOrchestrator` 编排一轮对话；`InitiativeEngine` 评分是否应该主动发言。
-- **领域状态**：profile、emotion、relationship、event 等 manager 负责状态规则和持久化入口。
+- **入口层**：根目录 `main.py` 与 `main_gui.py` 只做兼容转发，真实入口分别是 `anime_assistant.console` 与 `anime_assistant.ui.main_window`。
+- **界面层**：`ui/main_window.py` 负责窗口状态和交互，`ui/workers.py` 隔离后台对话线程，`ui/playback.py` 负责顺序音频播放。
+- **应用层**：`conversation/orchestrator.py` 编排一轮正常对话；`proactive/initiative_engine.py` 评分并提交主动对话。
+- **角色与情绪层**：`character/` 管理人设、资料和关系；`emotion/manager.py` 负责判断与状态转换，`emotion/signals.py` 统一本轮情绪信号协议。
 - **AI 适配层**：`ai/client.py` 创建 OpenAI 兼容客户端，`ai/chat.py` 组装角色提示词并生成回复。
-- **记忆层**：`context_builder.py` 整合事件语义分数、重要度、时间衰减和长期摘要。
-- **数据模型层**：`data_models.py` 统一校验配置、持久化状态与 AI JSON，限制枚举、类型和数值范围。
-- **基础设施**：`Storage_utils.py` 使用临时文件替换和 `.bak` 备份保护 JSON。
+- **记忆层**：`memory/` 管理短期历史、事件、长期摘要和语义检索；`conversation/context_builder.py` 组合这些数据。
+- **语音层**：`speech/service.py` 编排后端与降级策略，`speech/text.py` 处理朗读文本，`speech/audio.py` 处理 WAV 合并和嘴型包络。
+- **Live2D 层**：`live2d/canvas.py` 封装可选 OpenGL 画布，`live2d/controller.py` 管理参数动画与表情过渡。
+- **基础设施**：`infrastructure/` 统一配置、绝对路径、日志、数据模型和原子 JSON 存储。
+
+## 模块边界原则
+
+- 根目录不再放业务模块；新增能力应进入对应的 `anime_assistant` 功能包。
+- UI 不直接实现 AI、TTS 或情绪规则，只负责调用应用服务并通过 Qt 信号更新界面。
+- `service.py` 和 `manager.py` 可以保留兼容外观，但纯文本、纯音频、信号结构和画布适配应放到独立模块。
+- 包间引用使用 `anime_assistant.*` 绝对导入，避免依赖当前工作目录。
+- 默认配置中的脚本路径必须指向真实包内文件；旧本地配置由加载层迁移，不要求用户手改。
+- `tests/test_package_layout.py` 保护这些边界，防止重构后悄悄退回根目录堆叠。
 
 ## 正常对话时序
 
