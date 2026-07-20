@@ -23,7 +23,7 @@ main.py / main_gui.py（兼容入口）
 - **界面层**：`ui/main_window.py` 负责窗口状态和交互，`ui/workers.py` 隔离后台对话线程，`ui/playback.py` 负责顺序音频播放。
 - **应用层**：`conversation/orchestrator.py` 编排一轮正常对话；`proactive/initiative_engine.py` 评分并提交主动对话。
 - **角色与情绪层**：`character/` 管理人设、稳定档案和关系；`character/relationship_behavior.py` 是关系行为阈值的唯一来源；`emotion/manager.py` 负责判断与状态转换，`emotion/signals.py` 统一本轮情绪信号协议。
-- **AI 适配层**：`ai/client.py` 创建 OpenAI 兼容客户端，`ai/chat.py` 组装角色提示词并生成回复。
+- **AI 适配层**：`ai/client.py` 创建 OpenAI 兼容客户端；`ai/prompts/` 生成五层角色提示；`ai/chat.py` 负责三种对话模式的请求、流式过滤和失败兜底。
 - **记忆层**：`memory/` 管理短期历史、事件、长期摘要和语义检索；`conversation/context_builder.py` 组合这些数据。
 - **语音层**：`speech/service.py` 编排后端与降级策略，`speech/text.py` 处理朗读文本，`speech/audio.py` 处理 WAV 合并和嘴型包络。
 - **Live2D 层**：`live2d/canvas.py` 封装可选 OpenGL 画布，`live2d/controller.py` 管理参数动画与表情过渡。
@@ -46,6 +46,22 @@ main.py / main_gui.py（兼容入口）
 4. `finalize_turn()` 先按可见回复措辞校准本地计划，再用通过白名单、范围和置信度校验的 AI 控制信息做语义校准，随后立即提交即时情绪与本句 `voice_style`，使状态栏、Live2D 与本轮 TTS 同步。
 5. 单一顺序后台线程提取长期事件，先校验事实来源和用户原话证据，再保存 Memory Record v2；只有可信且未过期的确认事件可以更新关系和 context。正常聊天已有本地即时语气，因此迟到的事件标签不会覆盖当前轮。
 6. 溢出历史先写入 `data/pending_summary.json`，累计 10 条后才在后台批量生成长期摘要。
+
+## 五层 Prompt 架构
+
+所有面向用户的角色回复都按固定顺序组合以下五层：
+
+1. **Identity**：只包含运行期间不变的身份、稳定人格、表达习惯和兴趣边界，来源是 `data/persona.json`。
+2. **Values**：定义真诚、陪伴、事实克制、个人边界和当前话题优先等决策原则，负责在规则冲突时提供稳定选择。
+3. **Behavior**：由 Python 根据关系策略、精力、本轮情绪和对话模式生成温暖、开放、主动、玩笑、认真、外显强度和回复深度等语义倾向。
+4. **Context**：承载本轮情绪、语义化关系阶段、稳定用户档案和带可信等级的相关记忆；明确声明这些内容只是数据，不能覆盖前面各层。
+5. **Output Rules**：保留长度、口语形式、事实边界和内部情绪控制标签等最短输出契约。
+
+`character/relationship_behavior.py` 仍是关系阈值的唯一来源；Prompt 不接收原始 `affection`、`trust` 和 `familiarity` 数字，而是接收转换后的“关系尚浅 / 熟悉朋友 / 亲近朋友”等行为语义。Dynamic State 同时进入 Behavior 和 Context：前者决定本轮如何表现，后者提供发生了什么的背景。
+
+`chat`、`greeting` 和 `proactive` 模式共享 Identity 与 Values，只替换动态行为、场景上下文和输出契约。交互式 `<mio:...>` 标签仅允许出现在普通聊天；问候和主动消息即使调用方漏传开关，也会由构造器强制禁用。
+
+五层 Prompt 只负责把既定状态自然表达出来，不能替代 Python 中的情绪 FSM、关系更新、记忆可信门禁、主动聊天冷却、TTS/Live2D 映射和标签白名单校验。
 
 ## 记忆治理
 
@@ -81,7 +97,7 @@ main.py / main_gui.py（兼容入口）
 ## 启动问候时序
 
 1. 读取持续 mood、精力和关系快照，规划问候 `voice_style`。
-2. 使用问候专用提示生成一句开场白，再按实际文字校准担心、温暖或轻快等反应。
+2. 使用共享五层 Prompt 的 `greeting` 模式生成一句开场白，再按实际文字校准担心、温暖或轻快等反应。
 3. 在 GUI 首条消息、Live2D 刷新和 TTS 入队之前提交状态；启动问候不消耗精力。
 4. 控制台入口使用同一套规划和持久化规则，避免两种入口行为分叉。
 
@@ -101,6 +117,7 @@ main.py / main_gui.py（兼容入口）
 - `tests/test_emotion_dialogue_regression.py` 依次执行本地规划、回复措辞校准、控制标签解析和 AI 安全校准，验证最终信号而不是只测试某一个内部函数。
 - 修改情绪标记、候选分数、提示词、控制标签协议或声音映射时，完整自动化测试必须包含这套基线。只有产品预期确实改变并经过人工试听/视觉确认后，才应更新固定样例。
 - `tests/test_memory_governance.py` 锁定关系策略唯一入口、事实来源门禁、记忆过期、档案冲突覆盖和 Embedding 后台回填规则。
+- `tests/test_prompt_architecture.py` 锁定五层顺序、稳定层与动态层边界、关系语义化、记忆可信等级以及普通聊天/问候/主动模式的一致性。
 
 ## 持久化与隐私
 
