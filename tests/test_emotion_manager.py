@@ -65,6 +65,22 @@ class InteractionEmotionTests(unittest.TestCase):
         self.assertEqual(signal["modifier"], "worried")
         self.assertEqual(signal["voice_style"], "concerned")
 
+    def test_user_feeling_bad_becomes_visible_concern(self):
+        signal = plan_turn_emotion("我今天真的很难受，但暂时不想说原因。")
+
+        self.assertEqual(signal["user_mood"], "sad")
+        self.assertEqual(signal["mood"], "neutral")
+        self.assertEqual(signal["modifier"], "worried")
+        self.assertGreaterEqual(signal["modifier_strength"], 0.7)
+        self.assertEqual(signal["voice_style"], "concerned")
+
+    def test_negated_feeling_bad_does_not_trigger_concern(self):
+        signal = plan_turn_emotion("我现在已经不难受了，状态还可以。")
+
+        self.assertEqual(signal["user_mood"], "neutral")
+        self.assertEqual(signal["modifier"], "none")
+        self.assertEqual(signal["voice_style"], "conversational")
+
     def test_loneliness_takes_priority_over_boredom_and_questions(self):
         signal = plan_turn_emotion(
             "感觉暑假好无聊，也挺孤独的，没人找我聊天，有什么办法吗"

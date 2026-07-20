@@ -1,5 +1,6 @@
 from io import BytesIO
 import math
+import numpy as np
 import queue
 import struct
 import threading
@@ -8,6 +9,7 @@ import wave
 
 from anime_assistant.speech.service import (
     AivisSpeechError,
+    DEFAULT_MIO_GPT_SOVITS_REFERENCES,
     MioStyleBertClient,
     MioStyleBertError,
     SpeechSynthesisService,
@@ -17,7 +19,10 @@ from anime_assistant.speech.service import (
     prepare_spoken_text,
     split_sentences,
 )
-from anime_assistant.speech.gpt_sovits_worker import force_all_japanese_segments
+from anime_assistant.speech.gpt_sovits_worker import (
+    apply_output_gain,
+    force_all_japanese_segments,
+)
 
 
 def make_test_wav(sample_rate=8000, duration=0.3):
@@ -36,6 +41,22 @@ def make_test_wav(sample_rate=8000, duration=0.3):
 
 
 class TTSServiceTests(unittest.TestCase):
+    def test_concern_and_reassurance_use_separate_clean_references(self):
+        concerned = DEFAULT_MIO_GPT_SOVITS_REFERENCES["concerned"]
+        reassuring = DEFAULT_MIO_GPT_SOVITS_REFERENCES["reassuring"]
+
+        self.assertTrue(concerned["audio"].endswith("mio_pilot_0011.wav"))
+        self.assertTrue(reassuring["audio"].endswith("mio_pilot_0014.wav"))
+        self.assertNotEqual(concerned["audio"], reassuring["audio"])
+
+    def test_gpt_sovits_output_gain_preserves_shape_without_hard_clipping(self):
+        audio = np.asarray([-1.4, -0.7, 0.0, 0.7, 1.4], dtype=np.float32)
+
+        adjusted = apply_output_gain(audio, volume=1.0)
+
+        self.assertLessEqual(float(np.abs(adjusted).max()), 0.98001)
+        self.assertAlmostEqual(float(adjusted[3] / adjusted[4]), 0.5, places=5)
+
     def test_all_ja_forces_latin_names_through_japanese_frontend(self):
         class FakeLangSegmenter:
             @staticmethod

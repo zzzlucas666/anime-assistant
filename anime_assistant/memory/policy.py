@@ -143,6 +143,25 @@ def is_event_retrievable(event, now=None):
     )
 
 
+def memory_trust_tier(event, now=None):
+    """Return the prompt-facing trust tier for a retrievable event.
+
+    Only facts explicitly stated or corrected by the user are rendered as
+    high-trust. System observations and migrated legacy records remain useful
+    background, but are labelled medium-trust so the model does not present
+    them with false certainty. Candidate/inferred records return ``None``.
+    """
+    event = apply_lifecycle_defaults(event, now)
+    if not is_event_retrievable(event, now):
+        return None
+    if (
+        event.get("status") == "confirmed"
+        and event.get("source") in {"user_explicit", "user_corrected"}
+    ):
+        return "high"
+    return "medium"
+
+
 def can_event_affect_state(event, now=None):
     event = apply_lifecycle_defaults(event, now)
     has_required_evidence = (

@@ -27,7 +27,11 @@ from anime_assistant.memory.event_manager import load_all_events
 from anime_assistant.memory.semantic_memory import compute_similarity_scores
 from anime_assistant.memory.long_term_memory import get_summary_text
 from anime_assistant.infrastructure.logging import get_logger
-from anime_assistant.memory.policy import event_context_text, is_event_retrievable
+from anime_assistant.memory.policy import (
+    event_context_text,
+    is_event_retrievable,
+    memory_trust_tier,
+)
 
 logger = get_logger(__name__)
 
@@ -138,14 +142,16 @@ def build_memory_context(
     ranked_events = _rank_events(all_events, query_text)
     ranked_at = time.perf_counter()
 
-    event_memory_hint = _build_event_hint_with_budget(ranked_events, max_chars)
+    memory_entries = _build_memory_entries_with_budget(ranked_events, max_chars)
+    event_memory_hint = _render_memory_entries(memory_entries)
 
     summary_text = get_summary_text(limit=summary_limit)
     long_term_summary_hint = summary_text if summary_text else "（暂时没有需要回顾的长期记忆）"
 
     result = {
         "event_memory_hint": event_memory_hint,
-        "long_term_summary_hint": long_term_summary_hint
+        "long_term_summary_hint": long_term_summary_hint,
+        "memory_entries": memory_entries,
     }
     logger.info(
         "[PERF] build_memory_context events_load=%.4fs rank=%.4fs total=%.4fs events=%d",
@@ -159,19 +165,35 @@ def build_memory_context(
 
 def _build_event_hint_with_budget(events, max_chars):
     """把按综合分排好序的事件列表拼成文字，超过字符预算就停止添加（保留分数更高的）"""
-    if not events:
-        return "（暂时没有特别值得记住的事情）"
+    return _render_memory_entries(_build_memory_entries_with_budget(events, max_chars))
 
-    lines = []
+
+def _build_memory_entries_with_budget(events, max_chars):
+    """Select safe event text once and preserve its prompt-facing trust tier."""
+    if not events:
+        return []
+
+    entries = []
     total_chars = 0
     for e in events:
         desc = event_context_text(e)
-        if not desc:
+        trust = memory_trust_tier(e)
+        if not desc or trust is None:
             continue
         line = f"- {desc}"
         if total_chars + len(line) > max_chars:
             break
-        lines.append(line)
+        entries.append({
+            "text": desc,
+            "trust": trust,
+            "type": str(e.get("type") or "general"),
+            "source": str(e.get("source") or "legacy_import"),
+        })
         total_chars += len(line)
 
+    return entries
+
+
+def _render_memory_entries(entries):
+    lines = [f"- {entry['text']}" for entry in entries if entry.get("text")]
     return "\n".join(lines) if lines else "（暂时没有特别值得记住的事情）"
