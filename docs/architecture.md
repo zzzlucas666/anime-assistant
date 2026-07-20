@@ -22,7 +22,7 @@ main.py / main_gui.py（兼容入口）
 - **入口层**：根目录 `main.py` 与 `main_gui.py` 只做兼容转发，真实入口分别是 `anime_assistant.console` 与 `anime_assistant.ui.main_window`。
 - **界面层**：`ui/main_window.py` 负责窗口状态和交互，`ui/workers.py` 隔离后台对话线程，`ui/playback.py` 负责顺序音频播放。
 - **应用层**：`conversation/orchestrator.py` 编排一轮正常对话；`proactive/initiative_engine.py` 评分并提交主动对话。
-- **角色与情绪层**：`character/` 管理人设、资料和关系；`emotion/manager.py` 负责判断与状态转换，`emotion/signals.py` 统一本轮情绪信号协议。
+- **角色与情绪层**：`character/` 管理人设、稳定档案和关系；`character/relationship_behavior.py` 是关系行为阈值的唯一来源；`emotion/manager.py` 负责判断与状态转换，`emotion/signals.py` 统一本轮情绪信号协议。
 - **AI 适配层**：`ai/client.py` 创建 OpenAI 兼容客户端，`ai/chat.py` 组装角色提示词并生成回复。
 - **记忆层**：`memory/` 管理短期历史、事件、长期摘要和语义检索；`conversation/context_builder.py` 组合这些数据。
 - **语音层**：`speech/service.py` 编排后端与降级策略，`speech/text.py` 处理朗读文本，`speech/audio.py` 处理 WAV 合并和嘴型包络。
@@ -44,8 +44,18 @@ main.py / main_gui.py（兼容入口）
 2. 在共享锁内写入用户消息，并取历史与上下文快照。
 3. `stream_reply()` 在锁外使用快照和本轮反应提示生成流式回复；同一次回复末尾的 `<mio:...>` 控制标签由跨分块过滤器截获，只把可见文本交给 GUI。
 4. `finalize_turn()` 先按可见回复措辞校准本地计划，再用通过白名单、范围和置信度校验的 AI 控制信息做语义校准，随后立即提交即时情绪与本句 `voice_style`，使状态栏、Live2D 与本轮 TTS 同步。
-5. 单一顺序后台线程提取长期事件，再在锁内提交关系和 context；正常聊天已有本地即时语气，因此迟到的事件标签不会覆盖当前轮。
+5. 单一顺序后台线程提取长期事件，先校验事实来源和用户原话证据，再保存 Memory Record v2；只有可信且未过期的确认事件可以更新关系和 context。正常聊天已有本地即时语气，因此迟到的事件标签不会覆盖当前轮。
 6. 溢出历史先写入 `data/pending_summary.json`，累计 10 条后才在后台批量生成长期摘要。
+
+## 记忆治理
+
+- 事件记录统一包含 `type`、`status`、`source`、`confidence`、`evidence`、`expires_at` 和 Embedding 版本信息。
+- `user_explicit`、`user_corrected` 和 `system_observed` 是可信来源；AI 无法给出用户原话证据时，记录降级为 `ai_inferred + candidate`。
+- `candidate` 不参与提示词、主动聊天、情绪或关系状态更新，并在七天后过期；旧数据迁移为 `legacy_import + legacy`，继续可召回但不能再次改变关系。
+- `temporary_context`、`emotional_episode` 和无明确日期的 `plan` 使用不同默认有效期；身份、喜好和重要关系事件不采用统一 TTL。
+- 上下文注入优先使用已校验的用户原话，而不是 AI 撰写的事件摘要。
+- 稳定档案以事实列表为源数据，顶层 `name`、`nickname`、`likes` 和 `dislikes` 只是兼容读取视图。用户纠正会把旧事实标为 `superseded` 或 `retracted`，不会抹去历史。
+- 语义模型就绪后，后台任务以小批次补齐缺失或模型版本过期的向量；每批通过事件锁和原子 JSON 保存提交，不阻塞聊天路径。
 
 ## 情绪模型
 
@@ -81,6 +91,7 @@ main.py / main_gui.py（兼容入口）
 - `save_memory()` 必须原地截断列表，不得让多个持有者分叉。
 - 网络 AI 请求和长期摘要不得持有全局状态锁。
 - 正常对话的事件提取和摘要任务必须在单一后台队列中按对话顺序执行。
+- Embedding 回填不得持有状态锁进行模型推理，只允许在写回小批结果时短暂获取事件锁。
 - Qt 控件只能在 GUI 主线程修改。
 - 应用关闭时不得销毁仍在运行的 `ChatWorker` QThread。
 
@@ -89,6 +100,7 @@ main.py / main_gui.py（兼容入口）
 - `tests/emotion_dialogue_regression_cases.json` 是可读、可评审的固定对话数据集，锁定用户情绪、Mio 反应、Live2D modifier 与 TTS `voice_style` 的关键组合。
 - `tests/test_emotion_dialogue_regression.py` 依次执行本地规划、回复措辞校准、控制标签解析和 AI 安全校准，验证最终信号而不是只测试某一个内部函数。
 - 修改情绪标记、候选分数、提示词、控制标签协议或声音映射时，完整自动化测试必须包含这套基线。只有产品预期确实改变并经过人工试听/视觉确认后，才应更新固定样例。
+- `tests/test_memory_governance.py` 锁定关系策略唯一入口、事实来源门禁、记忆过期、档案冲突覆盖和 Embedding 后台回填规则。
 
 ## 持久化与隐私
 

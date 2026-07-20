@@ -1,10 +1,4 @@
-# context_manager.py
-
-def build_behavior_profile(relationship, emotion):
-    return {
-        "relationship": relationship,
-        "emotion": emotion
-    }
+from anime_assistant.character.relationship_behavior import build_behavior_profile
 
 class ContextManager:
     def __init__(self, config, emotion, profile, relationship):

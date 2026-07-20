@@ -7,6 +7,7 @@ from anime_assistant.infrastructure.paths import DATA_DIR
 from anime_assistant.conversation.context_builder import build_memory_context
 from anime_assistant.infrastructure.models import ALLOWED_VOICE_STYLES
 from anime_assistant.infrastructure.logging import get_logger
+from anime_assistant.character.relationship_behavior import build_relationship_hint
 
 logger = get_logger(__name__)
 
@@ -117,36 +118,6 @@ def get_user_display_name(profile):
     """返回用于内部提示词的用户称呼，不再绑定某个特定用户名。"""
     profile = profile or {}
     return profile.get("nickname") or profile.get("name") or "对方"
-
-
-def build_relationship_hint(relationship):
-    hints = []
-    affection = relationship.get("affection", 0)
-    trust = relationship.get("trust", 0)
-    familiarity = relationship.get("familiarity", 0)
-
-    if affection >= 70:
-        hints.append("- 现在对你很有好感，语气应该更亲近。")
-    elif affection >= 40:
-        hints.append("- 对你有好感，但语气上仍有些谨慎。")
-    else:
-        hints.append("- 目前好感度较低，语气应当更克制。")
-
-    if trust >= 70:
-        hints.append("- 信任感高，可以适当表达真实想法与感受。")
-    elif trust >= 40:
-        hints.append("- 信任感一般，建议保持真诚但不过度坦白。")
-    else:
-        hints.append("- 信任感较弱，交流时要避免过于敏感的内容。")
-
-    if familiarity >= 70:
-        hints.append("- 熟悉度高，可以用昵称并提及以前的事情。")
-    elif familiarity >= 40:
-        hints.append("- 熟悉度一般，适当使用昵称但不要显得太随便。")
-    else:
-        hints.append("- 熟悉度较低，交流时要保持礼貌和温柔。")
-
-    return "\n".join(hints)
 
 
 def build_turn_emotion_hint(turn_emotion):

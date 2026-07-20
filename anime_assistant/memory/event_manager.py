@@ -5,10 +5,27 @@ import threading
 import time
 from anime_assistant.ai.client import create_ai_client
 from anime_assistant.infrastructure.paths import DATA_DIR
-from anime_assistant.infrastructure.models import normalize_event_extraction, normalize_event_record, parse_json_object
+from anime_assistant.infrastructure.models import (
+    MEMORY_SCHEMA_VERSION,
+    normalize_event_extraction,
+    normalize_event_record,
+    parse_json_object,
+)
 from anime_assistant.infrastructure.storage import safe_load_json, safe_save_json
 from anime_assistant.infrastructure.logging import get_logger
-from anime_assistant.memory.semantic_memory import embed_text, find_semantically_relevant
+from anime_assistant.memory.semantic_memory import (
+    EMBEDDING_VERSION,
+    MODEL_NAME,
+    embed_text,
+    find_semantically_relevant,
+    is_model_ready,
+)
+from anime_assistant.memory.policy import (
+    apply_lifecycle_defaults,
+    build_provenance,
+    event_context_text,
+    is_event_retrievable,
+)
 
 logger = get_logger(__name__)
 
@@ -17,6 +34,8 @@ _event_cache_lock = threading.RLock()
 _event_cache_path = None
 _event_cache_signature = None
 _event_cache = None
+_embedding_backfill_lock = threading.Lock()
+_embedding_backfill_thread = None
 
 
 def default_events():
@@ -38,6 +57,12 @@ def _normalize_event(event, seen_ids=None):
     normalized = normalize_event_record(event)
     if normalized is None:
         return None, True
+    normalized = apply_lifecycle_defaults(normalized)
+    if normalized.get("embedding"):
+        if not normalized.get("embedding_model"):
+            normalized["embedding_model"] = MODEL_NAME
+        if not normalized.get("embedding_version"):
+            normalized["embedding_version"] = EMBEDDING_VERSION
     changed = normalized != event
 
     event_id = normalized.get("id")
@@ -154,7 +179,12 @@ def extract_event(api_key, model, user_message, ai_reply, base_url=None):
   "user_emotion": "用户本人的情绪，只能是 happy / sad / anxious / angry / embarrassed / neutral",
   "emotion": "Mio 对这件事的情绪，只能是 happy / shy / curious / sad / touched / worried / neutral",
   "impact": "increase_bond 或 increase_affinity 或 none",
-  "importance": 0.0到1.0之间的数字，表示这件事的重要程度
+  "importance": 0.0到1.0之间的数字，表示这件事的重要程度,
+  "type": "general / identity / preference / plan / emotional_episode / relationship_moment / temporary_context",
+  "source": "user_explicit / user_corrected / ai_inferred",
+  "evidence": "从用户原话中逐字复制的最短证据；不能逐字找到时必须为空字符串",
+  "confidence": 0.0到1.0之间的数字,
+  "expires_at": "有明确失效时间时返回 ISO 时间，否则返回 null"
 }}
 
 关于 "event" 字段的写法要求（很重要，影响后续能否被正确检索到）：
@@ -164,6 +194,10 @@ def extract_event(api_key, model, user_message, ai_reply, base_url=None):
 - 正例（够具体）："对方说下周三有一场很重要的数学考试，感到有点紧张，希望考好"
 - 反例（太空洞）："用户表达了对某事的喜好"
 - 正例（够具体）："对方说他很喜欢摇滚乐，尤其喜欢一些节奏强烈的乐队"
+- event 中的事实只能来自“用户说的话”，AI 的回复只可用于判断 Mio 的情绪
+- 不得根据常识补充用户没有说出的时间、地点、人物、原因或结果
+- source=user_explicit 时，evidence 必须是用户消息中的连续原文
+- 用户明确纠正旧资料时 source=user_corrected；无法提供原文证据时 source=ai_inferred
 
 判断标准：
 - increase_bond：能显著增进感情的事件（用户表达关心、分享心事、确认情感等），importance 通常 >= 0.7
@@ -206,8 +240,9 @@ AI的回复：
         return None
 
     event_text = result["event"]
-
-    return {
+    provenance = build_provenance(result, user_message)
+    event = {
+        "schema_version": MEMORY_SCHEMA_VERSION,
         "id": uuid.uuid4().hex,
         "event": event_text,
         "emotion": result["emotion"],
@@ -215,12 +250,15 @@ AI的回复：
         "impact": result["impact"],
         "importance": result["importance"],
         "notified": False,
-        # 创建时间，供 Hybrid Retrieval 计算"时间衰减"分数用
-        "created_at": datetime.datetime.now().isoformat(),
-        # 语义检索用的向量。embed_text 失败时返回 None，
-        # find_semantically_relevant 会自动跳过没有向量的事件，不影响其他功能。
-        "embedding": embed_text(event_text) if event_text else None
+        "type": result["type"],
+        **provenance,
     }
+    embedding_text = event_context_text(event)
+    embedding = embed_text(embedding_text) if event["status"] == "confirmed" else None
+    event["embedding"] = embedding
+    event["embedding_model"] = MODEL_NAME if embedding else ""
+    event["embedding_version"] = EMBEDDING_VERSION if embedding else ""
+    return event
 
 
 def save_event(event):
@@ -235,6 +273,8 @@ def save_event(event):
         data.append(normalized)
         if safe_save_json(EVENT_PATH, data):
             _replace_event_cache(data)
+            if normalized.get("embedding") is None and is_model_ready():
+                schedule_embedding_backfill()
 
 
 def load_all_events():
@@ -257,7 +297,11 @@ def load_recent_events(limit=5, min_importance=0.5):
 
     important_events = [
         e for e in data
-        if isinstance(e, dict) and e.get("importance", 0) >= min_importance
+        if (
+            isinstance(e, dict)
+            and is_event_retrievable(e)
+            and e.get("importance", 0) >= min_importance
+        )
     ]
 
     return important_events[-limit:]
@@ -273,6 +317,7 @@ def get_unnotified_important_events(min_importance=0.7):
     return [
         e for e in data
         if isinstance(e, dict)
+        and is_event_retrievable(e)
         and e.get("importance", 0) >= min_importance
         and not e.get("notified", False)
     ]
@@ -308,7 +353,91 @@ def get_semantically_relevant_events(query_text, top_k=3, min_importance=0.0):
     data = _load_events()
     candidates = [
         e for e in data
-        if isinstance(e, dict) and e.get("importance", 0) >= min_importance
+        if (
+            isinstance(e, dict)
+            and is_event_retrievable(e)
+            and e.get("importance", 0) >= min_importance
+        )
     ]
 
     return find_semantically_relevant(query_text, candidates, top_k=top_k)
+
+
+def _needs_embedding(event):
+    return (
+        isinstance(event, dict)
+        and is_event_retrievable(event)
+        and bool(event_context_text(event))
+        and (
+            not event.get("embedding")
+            or event.get("embedding_model") != MODEL_NAME
+            or event.get("embedding_version") != EMBEDDING_VERSION
+        )
+    )
+
+
+def backfill_missing_embeddings(batch_size=8, max_records=None):
+    """Fill missing/outdated vectors in small atomic batches; safe for a daemon thread."""
+    batch_size = max(1, int(batch_size))
+    snapshot = [event for event in _load_events() if _needs_embedding(event)]
+    if max_records is not None:
+        snapshot = snapshot[:max(0, int(max_records))]
+    updated_count = 0
+
+    for offset in range(0, len(snapshot), batch_size):
+        batch = snapshot[offset:offset + batch_size]
+        vectors = {}
+        for event in batch:
+            vector = embed_text(event_context_text(event), wait_for_model=True)
+            if vector:
+                vectors[event["id"]] = vector
+        if not vectors:
+            break
+
+        with _event_cache_lock:
+            current = [dict(event) for event in _load_events()]
+            changed = False
+            batch_updated = 0
+            for event in current:
+                vector = vectors.get(event.get("id"))
+                if vector is None or not _needs_embedding(event):
+                    continue
+                event["embedding"] = vector
+                event["embedding_model"] = MODEL_NAME
+                event["embedding_version"] = EMBEDDING_VERSION
+                event["updated_at"] = datetime.datetime.now(datetime.UTC).replace(
+                    tzinfo=None
+                ).isoformat(timespec="seconds")
+                changed = True
+                batch_updated += 1
+            if changed and safe_save_json(EVENT_PATH, current):
+                _replace_event_cache(current)
+                updated_count += batch_updated
+        time.sleep(0.02)
+
+    if updated_count:
+        logger.info("后台补齐事件向量完成，共更新 %d 条记忆。", updated_count)
+    return updated_count
+
+
+def _embedding_backfill_worker(batch_size):
+    try:
+        backfill_missing_embeddings(batch_size=batch_size)
+    except Exception as exc:
+        logger.warning("后台回填事件向量失败，已保留词面检索兜底：%s", exc)
+
+
+def schedule_embedding_backfill(batch_size=8):
+    """Start at most one low-priority backfill worker without blocking startup/chat."""
+    global _embedding_backfill_thread
+    with _embedding_backfill_lock:
+        if _embedding_backfill_thread is not None and _embedding_backfill_thread.is_alive():
+            return False
+        _embedding_backfill_thread = threading.Thread(
+            target=_embedding_backfill_worker,
+            args=(batch_size,),
+            name="memory-embedding-backfill",
+            daemon=True,
+        )
+        _embedding_backfill_thread.start()
+        return True

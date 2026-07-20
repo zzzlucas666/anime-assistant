@@ -9,7 +9,6 @@ import math
 
 
 ALLOWED_INTENTS = {"chat", "get_profile", "set_profile", "emotion_query"}
-ALLOWED_PROFILE_ACTIONS = {"add_like", "add_dislike", "set_name", "set_nickname", "none"}
 ALLOWED_MOODS = {"neutral", "happy", "shy", "sad", "tired"}
 ALLOWED_EVENT_EMOTIONS = {"neutral", "happy", "shy", "curious", "sad", "touched", "worried"}
 ALLOWED_USER_EMOTIONS = {
@@ -24,6 +23,24 @@ ALLOWED_VOICE_STYLES = {
 }
 ALLOWED_EVENT_IMPACTS = {"increase_bond", "increase_affinity", "none", "positive", "negative", "talk"}
 ALLOWED_MESSAGE_ROLES = {"user", "assistant"}
+MEMORY_SCHEMA_VERSION = 2
+ALLOWED_MEMORY_TYPES = {
+    "general", "identity", "preference", "plan", "emotional_episode",
+    "relationship_moment", "temporary_context",
+}
+ALLOWED_MEMORY_STATUSES = {
+    "candidate", "confirmed", "legacy", "superseded", "expired", "retracted",
+}
+ALLOWED_MEMORY_SOURCES = {
+    "user_explicit", "user_corrected", "system_observed", "ai_inferred", "legacy_import",
+}
+ALLOWED_PROFILE_ACTIONS = {
+    "add_like", "remove_like", "add_dislike", "remove_dislike",
+    "set_name", "set_nickname", "none",
+}
+ALLOWED_PROFILE_FACT_CATEGORIES = {
+    "identity.name", "identity.nickname", "preference.like", "preference.dislike",
+}
 
 
 def _clean_string(value, default=""):
@@ -141,6 +158,11 @@ def normalize_event_extraction(value):
             "user_emotion": "neutral",
             "impact": "none",
             "importance": 0.0,
+            "type": "general",
+            "source": "ai_inferred",
+            "evidence": "",
+            "confidence": 0.0,
+            "expires_at": None,
         }
 
     emotion = _clean_string(value.get("emotion"), "neutral")
@@ -153,6 +175,15 @@ def normalize_event_extraction(value):
     if impact not in ALLOWED_EVENT_IMPACTS:
         impact = "none"
     importance = _number(value.get("importance"), 0.3, 0.0, 1.0)
+    memory_type = _clean_string(value.get("type"), "general")
+    if memory_type not in ALLOWED_MEMORY_TYPES:
+        memory_type = "general"
+    source = _clean_string(value.get("source"), "ai_inferred")
+    if source not in {"user_explicit", "user_corrected", "ai_inferred"}:
+        source = "ai_inferred"
+    evidence = _clean_string(value.get("evidence"))
+    confidence = _number(value.get("confidence"), 0.0, 0.0, 1.0)
+    expires_at = value.get("expires_at") if isinstance(value.get("expires_at"), str) else None
     return {
         "is_event": True,
         "event": event_text,
@@ -160,6 +191,39 @@ def normalize_event_extraction(value):
         "user_emotion": user_emotion,
         "impact": impact,
         "importance": importance,
+        "type": memory_type,
+        "source": source,
+        "evidence": evidence,
+        "confidence": confidence,
+        "expires_at": expires_at,
+    }
+
+
+def normalize_profile_fact(value):
+    if not isinstance(value, dict):
+        return None
+    category = _clean_string(value.get("category"))
+    fact_value = _clean_string(value.get("value"))
+    if category not in ALLOWED_PROFILE_FACT_CATEGORIES or not fact_value:
+        return None
+    status = _clean_string(value.get("status"), "candidate")
+    if status not in ALLOWED_MEMORY_STATUSES:
+        status = "candidate"
+    source = _clean_string(value.get("source"), "ai_inferred")
+    if source not in ALLOWED_MEMORY_SOURCES:
+        source = "ai_inferred"
+    return {
+        "id": _clean_string(value.get("id")),
+        "category": category,
+        "value": fact_value,
+        "status": status,
+        "source": source,
+        "confidence": _number(value.get("confidence"), 0.0, 0.0, 1.0),
+        "created_at": value.get("created_at") if isinstance(value.get("created_at"), str) else None,
+        "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,
+        "supersedes": _clean_string(value.get("supersedes")) or None,
+        "superseded_by": _clean_string(value.get("superseded_by")) or None,
+        "evidence": _string_list(value.get("evidence")),
     }
 
 
@@ -173,13 +237,25 @@ def normalize_profile(value):
         names.append(name)
     if nickname and nickname not in nicknames:
         nicknames.append(nickname)
+    facts = []
+    seen_fact_ids = set()
+    for raw_fact in value.get("facts", []) if isinstance(value.get("facts"), list) else []:
+        fact = normalize_profile_fact(raw_fact)
+        if fact is None:
+            continue
+        if not fact["id"] or fact["id"] in seen_fact_ids:
+            continue
+        seen_fact_ids.add(fact["id"])
+        facts.append(fact)
     return {
+        "schema_version": MEMORY_SCHEMA_VERSION,
         "name": name,
         "nickname": nickname,
         "names": names,
         "nicknames": nicknames,
         "likes": _string_list(value.get("likes")),
         "dislikes": _string_list(value.get("dislikes")),
+        "facts": facts,
     }
 
 
@@ -300,6 +376,7 @@ def normalize_event_record(value):
     if not isinstance(value, dict):
         return None
 
+    is_legacy = _integer(value.get("schema_version"), 0, 0) < MEMORY_SCHEMA_VERSION
     event_id = _clean_string(value.get("id"))
     event_text = _clean_string(value.get("event"))
     emotion = _clean_string(value.get("emotion"), "neutral")
@@ -319,7 +396,18 @@ def normalize_event_record(value):
     ):
         embedding = None
 
+    memory_type = _clean_string(value.get("type"), "general")
+    if memory_type not in ALLOWED_MEMORY_TYPES:
+        memory_type = "general"
+    source = _clean_string(value.get("source"))
+    if source not in ALLOWED_MEMORY_SOURCES:
+        source = "legacy_import" if is_legacy else "ai_inferred"
+    status = _clean_string(value.get("status"))
+    if status not in ALLOWED_MEMORY_STATUSES:
+        status = "legacy" if is_legacy else "candidate"
+
     return {
+        "schema_version": MEMORY_SCHEMA_VERSION,
         "id": event_id,
         "event": event_text,
         "emotion": emotion,
@@ -328,7 +416,16 @@ def normalize_event_record(value):
         "importance": _number(value.get("importance"), 0.3, 0.0, 1.0),
         "notified": _boolean(value.get("notified"), False),
         "created_at": value.get("created_at") if isinstance(value.get("created_at"), str) else None,
+        "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,
+        "type": memory_type,
+        "status": status,
+        "source": source,
+        "confidence": _number(value.get("confidence"), 0.5 if is_legacy else 0.0, 0.0, 1.0),
+        "evidence": _string_list(value.get("evidence")),
+        "expires_at": value.get("expires_at") if isinstance(value.get("expires_at"), str) else None,
         "embedding": embedding,
+        "embedding_model": _clean_string(value.get("embedding_model")),
+        "embedding_version": _clean_string(value.get("embedding_version")),
     }
 
 

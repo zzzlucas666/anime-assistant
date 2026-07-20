@@ -27,6 +27,7 @@ from anime_assistant.memory.event_manager import load_all_events
 from anime_assistant.memory.semantic_memory import compute_similarity_scores
 from anime_assistant.memory.long_term_memory import get_summary_text
 from anime_assistant.infrastructure.logging import get_logger
+from anime_assistant.memory.policy import event_context_text, is_event_retrievable
 
 logger = get_logger(__name__)
 
@@ -72,6 +73,7 @@ def _rank_events(events, query_text):
     给每条事件算综合分，按分数从高到低排序返回（不做数量截断，
     截断交给调用方按字符预算来做）。
     """
+    events = [event for event in events if is_event_retrievable(event)]
     if not events:
         return []
 
@@ -163,7 +165,7 @@ def _build_event_hint_with_budget(events, max_chars):
     lines = []
     total_chars = 0
     for e in events:
-        desc = e.get("event", "")
+        desc = event_context_text(e)
         if not desc:
             continue
         line = f"- {desc}"

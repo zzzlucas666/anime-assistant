@@ -20,10 +20,12 @@ from anime_assistant.character.relationship_manager import load_relationship
 from anime_assistant.conversation.orchestrator import ConversationOrchestrator
 from anime_assistant.proactive.initiative_engine import InitiativeEngine
 from anime_assistant.memory.semantic_memory import warmup_model_async
+from anime_assistant.memory.event_manager import schedule_embedding_backfill
 
 def main():
     config = load_config()
     warmup_model_async()
+    schedule_embedding_backfill()
     conversation_history = load_memory()
     emotion = load_emotion()
     profile = load_profile()
