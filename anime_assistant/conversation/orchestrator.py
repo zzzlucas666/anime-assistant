@@ -34,11 +34,12 @@ from anime_assistant.emotion.manager import (
 )
 from anime_assistant.memory.event_manager import extract_event, save_event
 from anime_assistant.character.relationship_manager import update_relationship, save_relationship
-from anime_assistant.character.profile_manager import save_profile
+from anime_assistant.character.profile_manager import apply_profile_action, save_profile
 from anime_assistant.memory.memory_manager import save_memory
 from anime_assistant.proactive.interaction_tracker import update_last_interaction_time
 from anime_assistant.memory.long_term_memory import queue_summary_messages, summarize_pending_if_ready
 from anime_assistant.infrastructure.logging import get_logger
+from anime_assistant.memory.policy import can_event_affect_state
 
 
 logger = get_logger(__name__)
@@ -106,12 +107,14 @@ class ConversationOrchestrator:
         """
         profile_keywords = (
             "我喜欢", "我爱", "我讨厌", "我不喜欢", "我反感",
+            "我不再喜欢", "我现在不喜欢", "我不再讨厌", "我现在不讨厌",
+            "以前喜欢", "以前讨厌", "记错了", "更正一下", "改成",
             "我叫", "我的名字是", "我的名字叫", "我名字是", "我名字叫",
             "你可以叫我", "以后叫我", "叫我", "我的昵称",
         )
         return any(keyword in clean_message for keyword in profile_keywords)
 
-    def _apply_profile_update(self, intent, confidence, profile_info):
+    def _apply_profile_update(self, intent, confidence, profile_info, user_message=""):
         """根据 profile_extractor 的结果更新 profile（如果置信度够高）"""
         action = profile_info.get("action")
         value = profile_info.get("value")
@@ -119,23 +122,22 @@ class ConversationOrchestrator:
         if intent != "set_profile" or confidence <= 0.5:
             return
 
-        if action == "add_like":
-            if value and value not in self.profile["likes"]:
-                self.profile["likes"].append(value)
-
-        elif action == "add_dislike":
-            if value and value not in self.profile["dislikes"]:
-                self.profile["dislikes"].append(value)
-
-        elif action == "set_name":
-            if value:
-                self.profile["name"] = value
-
-        elif action == "set_nickname":
-            if value:
-                self.profile["nickname"] = value
-
-        save_profile(self.profile)
+        if action != "none" and value:
+            correction_markers = ("不再", "现在不", "更正", "记错", "改成", "不是")
+            source = (
+                "user_corrected"
+                if action.startswith("remove_") or any(marker in user_message for marker in correction_markers)
+                else "user_explicit"
+            )
+            apply_profile_action(
+                self.profile,
+                action,
+                value,
+                source=source,
+                confidence=confidence,
+                evidence=[user_message] if user_message else [value],
+            )
+            save_profile(self.profile)
 
     def prepare_turn(self, user_message):
         """
@@ -191,7 +193,7 @@ class ConversationOrchestrator:
         # 跟 InitiativeEngine 的后台检查共用同一把锁，避免并发写冲突。
         # AI调用本身（上面的 intent/profile_info）不占锁，不阻塞后台线程。
         with self.lock:
-            self._apply_profile_update(intent, confidence, profile_info)
+            self._apply_profile_update(intent, confidence, profile_info, clean_message)
 
             # 记录用户消息
             self.conversation_history.append({"role": "user", "content": clean_message})
@@ -395,20 +397,22 @@ class ConversationOrchestrator:
             event_duration = time.perf_counter() - event_started_at
 
         state_changed = False
+        event_can_mutate_state = can_event_affect_state(event)
         with self.lock:
             # 即时信号已在 finalize_turn 应用时，不再让稍后返回的长期事件
             # 标签覆盖它，也避免同一轮重复消耗精力。
-            if not task.get("immediate_emotion_applied", False):
+            if not task.get("immediate_emotion_applied", False) and event_can_mutate_state:
                 self.emotion = update_emotion(self.emotion, event)
                 save_emotion(self.emotion)
                 state_changed = True
 
             if not router_reply:
                 save_event(event)
-                relationship_before = copy.deepcopy(self.relationship)
-                self.relationship = update_relationship(self.relationship, event)
-                save_relationship(self.relationship)
-                state_changed = state_changed or self.relationship != relationship_before
+                if event_can_mutate_state:
+                    relationship_before = copy.deepcopy(self.relationship)
+                    self.relationship = update_relationship(self.relationship, event)
+                    save_relationship(self.relationship)
+                    state_changed = state_changed or self.relationship != relationship_before
 
             self.context.update(self.emotion, self.profile, self.relationship)
 

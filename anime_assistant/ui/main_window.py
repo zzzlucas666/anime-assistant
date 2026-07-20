@@ -74,6 +74,7 @@ from anime_assistant.live2d.canvas import LIVE2D_AVAILABLE, Live2DWidget, live2d
 from anime_assistant.live2d.model_utils import load_live2d_model_metadata, resolve_live2d_model_path
 from anime_assistant.live2d.parameter_tuner import Live2DParameterTuner
 from anime_assistant.memory.semantic_memory import warmup_model_async
+from anime_assistant.memory.event_manager import schedule_embedding_backfill
 from anime_assistant.speech.service import SpeechSynthesisService
 from anime_assistant.ui.playback import SpeechPlaybackController
 from anime_assistant.ui.workers import ChatWorker, ProactiveBridge, SpeechBridge
@@ -309,13 +310,17 @@ class MainWindow(QMainWindow):
                 on_error=self.speech_bridge.error_occurred.emit,
                 on_status=self.speech_bridge.status_changed.emit,
             )
+        def warmup_memory_services():
+            warmup_model_async()
+            schedule_embedding_backfill()
+
         prewarm_started = False
         if self.speech_service is not None:
             prewarm_started = self.speech_service.prewarm(
-                on_complete=warmup_model_async
+                on_complete=warmup_memory_services
             )
         if not prewarm_started:
-            warmup_model_async()
+            warmup_memory_services()
         self._start_timers()
         self._start_background_thread()
         self._show_greeting()

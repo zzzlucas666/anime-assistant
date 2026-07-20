@@ -1,6 +1,7 @@
 from anime_assistant.infrastructure.storage import safe_load_json, safe_save_json
 from anime_assistant.infrastructure.paths import DATA_DIR
 from anime_assistant.infrastructure.models import normalize_event_record, normalize_relationship
+from anime_assistant.memory.policy import can_event_affect_state
 
 RELATIONSHIP_PATH = str(DATA_DIR / "relationship.json")
 
@@ -43,6 +44,11 @@ def update_relationship(relationship, event):
     normalized = normalize_relationship(relationship)
     relationship.clear()
     relationship.update(normalized)
+
+    # Defense in depth: callers cannot accidentally let an inferred, expired,
+    # or otherwise untrusted memory mutate persistent relationship state.
+    if event and not can_event_affect_state(event):
+        return relationship
 
     # 兼容旧调用方式（直接传字符串）
     if isinstance(event, str):

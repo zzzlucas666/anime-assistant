@@ -19,10 +19,12 @@ import re
 import threading
 import time
 from anime_assistant.infrastructure.logging import get_logger
+from anime_assistant.memory.policy import event_context_text
 
 logger = get_logger(__name__)
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
+EMBEDDING_VERSION = "1"
 
 _model = None
 _model_state = "idle"  # idle / loading / ready / failed
@@ -135,7 +137,7 @@ def _lexical_similarity(text_a, text_b):
 
 def _lexical_scores(query_text, candidates):
     return {
-        event.get("id"): _lexical_similarity(query_text, event.get("event", ""))
+        event.get("id"): _lexical_similarity(query_text, event_context_text(event))
         for event in candidates
         if isinstance(event, dict) and event.get("id")
     }
@@ -180,7 +182,7 @@ def find_semantically_relevant(query_text, candidates, top_k=3, min_similarity=0
             continue
         event_vector = event.get("embedding")
         if not event_vector:
-            sim = _lexical_similarity(query_text, event.get("event", ""))
+            sim = _lexical_similarity(query_text, event_context_text(event))
         else:
             sim = cosine_similarity(query_vector, event_vector)
         if sim >= min_similarity:

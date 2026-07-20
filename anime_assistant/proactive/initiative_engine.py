@@ -35,6 +35,7 @@ import datetime
 import copy
 
 from anime_assistant.memory.event_manager import get_unnotified_important_events, mark_event_notified
+from anime_assistant.memory.policy import event_context_text
 from anime_assistant.proactive.interaction_tracker import load_last_interaction_time, update_last_interaction_time
 from anime_assistant.proactive.proactive_tracker import can_trigger_proactive, record_proactive_trigger
 from anime_assistant.ai.chat import generate_proactive_message, get_user_display_name
@@ -157,7 +158,7 @@ class InitiativeEngine:
 
         top_event = signals["top_event"]
         if top_event and top_event.get("importance", 0) >= MIN_EVENT_IMPORTANCE_TO_MENTION:
-            reasons.append(f"你想起了之前发生的一件事：{top_event.get('event', '')}，想跟他提起这件事。")
+            reasons.append(f"你想起了之前发生的一件事：{event_context_text(top_event)}，想跟他提起这件事。")
 
         idle_minutes = signals["idle_minutes"]
         if signals["emotion_score"] > 0.1:
