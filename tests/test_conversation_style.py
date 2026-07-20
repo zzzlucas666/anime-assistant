@@ -102,14 +102,32 @@ class ConversationStylePromptTests(unittest.TestCase):
         with patch("anime_assistant.ai.chat.build_memory_context", return_value=memory):
             prompt = chat.build_system_prompt(context, "你喜欢什么天气")
 
-        self.assertIn("日常聊天通常只回复 1~2 句", prompt)
+        self.assertLess(
+            prompt.index("Identity｜固定身份"),
+            prompt.index("Values｜交流价值观"),
+        )
+        self.assertLess(
+            prompt.index("Values｜交流价值观"),
+            prompt.index("Behavior｜当前行为倾向"),
+        )
+        self.assertLess(
+            prompt.index("Behavior｜当前行为倾向"),
+            prompt.index("Context｜本轮动态上下文"),
+        )
+        self.assertLess(
+            prompt.index("Context｜本轮动态上下文"),
+            prompt.index("Output Rules｜输出契约"),
+        )
+        self.assertIn("日常聊天通常回复 1~2 句", prompt)
         self.assertIn("12~55 个汉字", prompt)
-        self.assertIn("不写散文", prompt)
-        self.assertIn("不要虚构朋友的动作", prompt)
-        self.assertIn("完全不使用括号动作描写", prompt)
-        self.assertIn("不要主动提贝斯", prompt)
-        self.assertIn("历史内容只用于记住", prompt)
-        self.assertIn("喜欢什么样的人", prompt)
+        self.assertIn("散文或连续比喻", prompt)
+        self.assertIn("不使用换行列表、括号动作", prompt)
+        self.assertIn("不编造未经确认的事实", prompt)
+        self.assertIn("不主动提贝斯", prompt)
+        self.assertIn("记忆只用于理解背景", prompt)
+        self.assertIn("真诚优先于讨好", prompt)
+        self.assertNotIn("好感度 affection", prompt)
+        self.assertNotIn("信任度 trust", prompt)
         self.assertIn("<mio:USER_MOOD|REACTION|VOICE_STYLE|STRENGTH|CONFIDENCE>", prompt)
         self.assertIn("用户难过、焦虑或疲惫时", prompt)
 
@@ -128,9 +146,13 @@ class ConversationStylePromptTests(unittest.TestCase):
                 context,
                 "主动找用户聊天",
                 include_emotion_control=False,
+                mode="proactive",
+                purpose_hint="已经有一段时间没有聊天",
             )
 
         self.assertNotIn("<mio:USER_MOOD|REACTION|VOICE_STYLE", prompt)
+        self.assertIn("当前由 Mio 主动开启话题", prompt)
+        self.assertIn("不解释触发原因", prompt)
 
     def test_chat_request_has_bounded_output_budget(self):
         client = Mock()

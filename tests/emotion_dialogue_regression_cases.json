@@ -16,6 +16,19 @@
       }
     },
     {
+      "id": "feeling_bad_without_explanation_triggers_concern",
+      "user_message": "我今天真的很难受，但暂时不想说原因。",
+      "assistant_reply": "嗯，不想说就先别说了。我会在这里陪着你的。",
+      "control_tag": "<mio:sad|worried|concerned|0.80|0.94>",
+      "expected": {
+        "user_mood": "sad",
+        "mood": "neutral",
+        "modifier": "worried",
+        "voice_style": "concerned",
+        "decision_source": "hybrid_ai"
+      }
+    },
+    {
       "id": "exam_anxiety_uses_reassuring_voice",
       "user_message": "我最近有点紧张，很担心明天的考试。",
       "assistant_reply": "嗯，考试前会紧张很正常。先把今天能做的复习做好吧。",

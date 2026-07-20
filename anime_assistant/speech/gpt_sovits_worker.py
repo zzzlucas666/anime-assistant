@@ -49,6 +49,22 @@ def emit(event_type, **payload):
     )
 
 
+def apply_output_gain(audio, volume, peak_limit=0.98):
+    """Apply output gain without hard-clipping generated speech.
+
+    GPT-SoVITS normally returns floating-point audio, but a few expressive
+    generations can exceed full scale.  Direct clipping turns those peaks into
+    audible crackle, so preserve the waveform and lower the complete result
+    just enough to leave a small amount of headroom.
+    """
+    scaled = audio * volume
+    if getattr(scaled, "size", 0):
+        peak = float(abs(scaled).max())
+        if peak > peak_limit:
+            scaled = scaled * (peak_limit / peak)
+    return scaled
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
@@ -195,7 +211,7 @@ def main():
                 audio = audio.astype(np.float32) / full_scale
             else:
                 audio = audio.astype(np.float32)
-            audio = np.clip(audio * volume, -1.0, 1.0)
+            audio = apply_output_gain(audio, volume)
             output_path = output_dir / f"{request_id}.wav"
             sf.write(output_path, audio, sample_rate, subtype="PCM_16")
             emit(

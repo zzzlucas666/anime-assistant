@@ -158,16 +158,16 @@ DEFAULT_MIO_GPT_SOVITS_REFERENCES = {
     "concerned": {
         "audio": (
             "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0022.wav"
+            "mio_pilot_0011.wav"
         ),
-        "prompt": "きっとやれるよな。怖くない。怖くない。フジツボは嫌いだ。",
+        "prompt": "いろいろあるなぁ。どれにしよう。迷うなぁ。これなんかどうかな。",
     },
     "reassuring": {
         "audio": (
             "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0022.wav"
+            "mio_pilot_0014.wav"
         ),
-        "prompt": "きっとやれるよな。怖くない。怖くない。フジツボは嫌いだ。",
+        "prompt": "よし、うまくいったな。うん、ありがとう。じゃあな、また。",
     },
     "curious": {
         "audio": (
