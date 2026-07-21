@@ -17,40 +17,80 @@
 
 import logging
 import os
+import threading
+from logging.handlers import RotatingFileHandler
 
 from anime_assistant.infrastructure.paths import DATA_DIR
 
 LOG_PATH = str(DATA_DIR / "app.log")
+DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 3
 _initialized_loggers = set()
+_handler_lock = threading.RLock()
+_file_handler = None
+_console_handler = None
+
+
+def _positive_env_int(name, default):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+LOG_MAX_BYTES = _positive_env_int(
+    "ANIME_ASSISTANT_LOG_MAX_BYTES",
+    DEFAULT_LOG_MAX_BYTES,
+)
+LOG_BACKUP_COUNT = _positive_env_int(
+    "ANIME_ASSISTANT_LOG_BACKUP_COUNT",
+    DEFAULT_LOG_BACKUP_COUNT,
+)
+
+
+def _shared_handlers():
+    """Create one handler pair shared by all module loggers.
+
+    Sharing matters on Windows: multiple rotating handlers holding the same file
+    can otherwise race while renaming it during rollover.
+    """
+    global _file_handler, _console_handler
+    if _file_handler is not None and _console_handler is not None:
+        return _file_handler, _console_handler
+
+    os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    _file_handler = RotatingFileHandler(
+        LOG_PATH,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+        delay=True,
+    )
+    _file_handler.setFormatter(formatter)
+    _file_handler.setLevel(logging.INFO)
+
+    _console_handler = logging.StreamHandler()
+    _console_handler.setFormatter(formatter)
+    _console_handler.setLevel(logging.WARNING)
+    return _file_handler, _console_handler
 
 
 def get_logger(name):
     logger = logging.getLogger(name)
+    with _handler_lock:
+        if name in _initialized_loggers:
+            return logger
 
-    if name in _initialized_loggers:
-        return logger
-
-    os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
-
-    formatter = logging.Formatter(
-        "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-
-    # 写文件：记录所有 INFO 及以上的日志，留作事后排查
-    file_handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.INFO)
-
-    # 同时打印到控制台：只显示 WARNING 及以上，避免正常运行时刷屏
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(logging.WARNING)
-
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False  # 避免重复打印（不传给root logger）
-
-    _initialized_loggers.add(name)
+        file_handler, console_handler = _shared_handlers()
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False  # 避免重复打印（不传给root logger）
+        _initialized_loggers.add(name)
     return logger

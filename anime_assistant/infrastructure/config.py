@@ -3,12 +3,12 @@ import math
 import sys
 from pathlib import Path
 
-from anime_assistant.ai.client import DEFAULT_BASE_URL
+from anime_assistant.ai.config import DEFAULT_BASE_URL
 from anime_assistant.infrastructure.paths import CONFIG_DIR
 from anime_assistant.infrastructure.models import normalize_app_config
 from anime_assistant.infrastructure.logging import get_logger
 from anime_assistant.infrastructure.storage import safe_save_json
-from anime_assistant.speech.service import (
+from anime_assistant.speech.config import (
     DEFAULT_AIVIS_ENDPOINT,
     DEFAULT_AIVIS_MAX_CHARS,
     DEFAULT_AIVIS_TIMEOUT_SECONDS,
