@@ -3,10 +3,88 @@ import unittest
 import datetime
 from unittest.mock import Mock, patch
 
-from anime_assistant.proactive.initiative_engine import InitiativeEngine
+from anime_assistant.proactive.initiative_engine import (
+    InitiativeEngine,
+    MIN_EVENT_IMPORTANCE_TO_MENTION,
+    MIN_EVENT_IMPORTANCE_TO_SCORE,
+)
 
 
 class InitiativeEngineCompatibilityTests(unittest.TestCase):
+    @staticmethod
+    def _engine(*, emotion=None, familiarity=10):
+        context = Mock()
+        context.get_context.return_value = {"context": "snapshot"}
+        return InitiativeEngine(
+            config={"api_key": "unused", "model": "unused"},
+            context=context,
+            conversation_history=[],
+            emotion=emotion or {"mood": "neutral", "energy": 80},
+            profile={},
+            relationship={"familiarity": familiarity},
+            lock=threading.Lock(),
+        )
+
+    def test_event_scoring_and_mention_thresholds_are_separate(self):
+        self.assertLess(
+            MIN_EVENT_IMPORTANCE_TO_SCORE,
+            MIN_EVENT_IMPORTANCE_TO_MENTION,
+        )
+
+        engine = self._engine()
+        medium_event = {"id": "medium", "event": "普通近况", "importance": 0.55}
+        with patch(
+            "anime_assistant.proactive.initiative_engine.get_unnotified_important_events",
+            return_value=[medium_event],
+        ) as get_events:
+            signals = engine._compute_signals(idle_minutes=0)
+
+        get_events.assert_called_once_with(
+            min_importance=MIN_EVENT_IMPORTANCE_TO_SCORE
+        )
+        self.assertEqual(signals["top_event"], medium_event)
+        self.assertEqual(signals["event_score"], 0.55)
+
+    def test_medium_event_can_help_trigger_without_being_mentioned(self):
+        engine = self._engine(emotion={"mood": "sad", "energy": 80})
+        signals = {
+            "event_score": 0.55,
+            "emotion_score": 0.5,
+            "idle_score": 0.0,
+            "top_event": {
+                "id": "medium-event",
+                "event": "用户最近换了常用水杯",
+                "importance": 0.55,
+            },
+            "idle_minutes": 15,
+            "mood": "sad",
+            "energy": 80,
+            "familiarity_pct": 10,
+        }
+        captured_reason = []
+
+        def generate(_context, reason_hint):
+            captured_reason.append(reason_hint)
+            return "想和你说说话。"
+
+        with (
+            patch("anime_assistant.proactive.initiative_engine.can_trigger_proactive", return_value=True),
+            patch("anime_assistant.proactive.initiative_engine.load_last_interaction_time", return_value=None),
+            patch.object(engine, "_compute_signals", return_value=signals),
+            patch("anime_assistant.proactive.initiative_engine.generate_proactive_message", side_effect=generate),
+            patch("anime_assistant.proactive.initiative_engine.mark_event_notified") as mark_notified,
+            patch("anime_assistant.proactive.initiative_engine.save_emotion"),
+            patch.object(engine, "_record_message", return_value=[]),
+            patch("anime_assistant.proactive.initiative_engine.summarize_pending_if_ready", return_value=False),
+        ):
+            message = engine.check_and_trigger()
+
+        self.assertEqual(message, "想和你说说话。")
+        self.assertEqual(len(captured_reason), 1)
+        self.assertNotIn("换了常用水杯", captured_reason[0])
+        self.assertIn("心情不太好", captured_reason[0])
+        mark_notified.assert_not_called()
+
     def test_missing_legacy_event_id_does_not_drop_generated_message(self):
         context = Mock()
         context.get_context.return_value = {"context": "snapshot"}

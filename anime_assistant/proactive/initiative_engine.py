@@ -54,9 +54,10 @@ IDLE_WEIGHT = 0.2
 # 总分超过这个阈值才真正触发。可以理解成"综合渴望聊天程度"的及格线。
 TRIGGER_THRESHOLD = 0.4
 
-# 事件的重要度至少要到这个程度，才会被写进 reason_hint 里、并在触发后标记为"已提及"
-# （重要度太低的事件，即使凑够了分数触发，也不适合被当作"主动提起的具体内容"）
-MIN_EVENT_IMPORTANCE_TO_MENTION = 0.5
+# 中等重要度事件可以参与“是否主动聊天”的综合评分，但只有更重要的
+# 事件才会被写进 reason_hint，并在实际提起后标记为“已提及”。
+MIN_EVENT_IMPORTANCE_TO_SCORE = 0.4
+MIN_EVENT_IMPORTANCE_TO_MENTION = 0.65
 
 # 情绪/熟悉度这类信号依赖"空闲时间"，这里限制 idle_factor 的上限，
 # 避免空闲特别久之后分数无限膨胀（比如挂机一整周，分数也不该比挂机一天高太多）
@@ -115,7 +116,9 @@ class InitiativeEngine:
             idle_factor = min(idle_minutes / self.idle_threshold_minutes, MAX_IDLE_FACTOR)
 
         # 信号1：未提及的重要事件，取重要度最高的一条
-        unnotified_events = get_unnotified_important_events(min_importance=0.5)
+        unnotified_events = get_unnotified_important_events(
+            min_importance=MIN_EVENT_IMPORTANCE_TO_SCORE
+        )
         top_event = None
         if unnotified_events:
             top_event = max(unnotified_events, key=lambda e: e.get("importance", 0))
