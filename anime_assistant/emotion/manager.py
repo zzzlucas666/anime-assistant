@@ -5,6 +5,8 @@ from anime_assistant.infrastructure.storage import safe_load_json, safe_save_jso
 from anime_assistant.infrastructure.paths import DATA_DIR
 from anime_assistant.infrastructure.models import ALLOWED_VOICE_STYLES, normalize_emotion
 from anime_assistant.emotion.signals import (
+    EMOTION_CONTROL_REACTIONS,
+    EMOTION_CONTROL_USER_MOODS,
     EmotionCandidate,
     EmotionSignal,
     MODIFIER_DURATIONS,
@@ -28,14 +30,6 @@ FATIGUE_ENTER_ENERGY = 25
 FATIGUE_EXIT_ENERGY = 35
 
 POSITIVE_MOODS = {"happy", "shy"}
-AI_CONTROL_USER_MOODS = {
-    "neutral", "happy", "sad", "anxious", "angry", "lonely",
-    "bored", "stressed", "tired", "disappointed",
-}
-AI_CONTROL_REACTIONS = {
-    "neutral", "happy", "shy", "sad", "worried", "touched",
-    "curious", "surprised", "annoyed",
-}
 DISTRESS_USER_MOODS = {
     "sad", "anxious", "angry", "lonely", "stressed", "tired", "disappointed",
 }
@@ -495,18 +489,19 @@ def plan_proactive_emotion(message, signals=None, emotion=None, relationship=Non
         _set_voice_style(signal, "concerned", 0.76)
         signal["reason"] = "proactive_concern"
     elif event_emotion == "touched":
-        _set_primary(signal, "happy", 0.58, "proactive_touched_event", 3)
+        # 回忆旧事件只塑造本句的表情修饰和语气，不重新续期持续 mood。
         _set_modifier(signal, "touched", 0.62, 2)
         _set_voice_style(signal, "warm", 0.72)
+        signal["reason"] = "proactive_touched_event"
     elif event_emotion == "happy" or _contains_any(text, PROACTIVE_HAPPY_MARKERS):
-        _set_primary(signal, "happy", 0.62, "proactive_happy_topic", 3)
         _set_voice_style(signal, "cheerful", 0.68)
+        signal["reason"] = "proactive_happy_topic"
     elif event_emotion == "shy":
-        _set_primary(signal, "shy", 0.58, "proactive_shy_topic", 2)
         _set_voice_style(signal, "bashful", 0.68)
+        signal["reason"] = "proactive_shy_topic"
     elif event_emotion == "sad":
-        _set_primary(signal, "sad", 0.58, "proactive_sad_topic", 3)
         _set_voice_style(signal, "disappointed", 0.68)
+        signal["reason"] = "proactive_sad_topic"
     elif state.get("mood") == "tired" or float(state.get("fatigue_strength", 0.0) or 0.0) >= 0.65:
         _set_voice_style(signal, "tired", 0.72)
         signal["reason"] = "proactive_fatigue"
@@ -635,8 +630,8 @@ def apply_ai_emotion_control(planned, control):
     ai_confidence = _bounded_probability(control.get("confidence"), 0.0)
     if (
         ai_confidence < 0.55
-        or user_mood not in AI_CONTROL_USER_MOODS
-        or reaction not in AI_CONTROL_REACTIONS
+        or user_mood not in EMOTION_CONTROL_USER_MOODS
+        or reaction not in EMOTION_CONTROL_REACTIONS
         or voice_style not in ALLOWED_VOICE_STYLES
     ):
         return signal
@@ -648,6 +643,15 @@ def apply_ai_emotion_control(planned, control):
         local_user_mood in DISTRESS_USER_MOODS
         and local_confidence >= 0.72
         and local_reason != "negative_words_toward_mio"
+    )
+    possible_support = (
+        local_user_mood in DISTRESS_USER_MOODS
+        and local_confidence >= 0.5
+        and local_reason != "negative_words_toward_mio"
+    )
+    conflicts_with_support = (
+        user_mood not in DISTRESS_USER_MOODS
+        and reaction in {"happy", "shy"}
     )
     strong_directed_negative = (
         local_reason == "negative_words_toward_mio" and local_confidence >= 0.72
@@ -663,6 +667,10 @@ def apply_ai_emotion_control(planned, control):
             _set_modifier(signal, "worried", max(0.5, strength), 3)
         if voice_style in SUPPORT_VOICE_STYLES:
             _set_voice_style(signal, voice_style, strength)
+    elif possible_support and conflicts_with_support:
+        # 隐晦的负面表达即使没有达到强保护阈值，也不能被冲突的正向
+        # AI 标签直接改成开心/害羞；保留本地计划，等待后续对话澄清。
+        pass
     else:
         if user_mood != "neutral" and (
             local_user_mood == "neutral" or ai_confidence > local_confidence + 0.08
@@ -773,10 +781,15 @@ def _apply_mood_signal(emotion, signal, now):
     current_mood = emotion.get("mood", "neutral")
     current_strength = float(emotion.get("mood_strength", 0.0) or 0.0)
     duration = int(signal.get("duration_turns") or MOOD_DURATIONS.get(new_mood, 3))
+    # duration 包含触发情绪的当前轮；这里只记录之后还应保留几轮。
+    remaining_after_trigger = max(0, duration - 1)
 
     if new_mood == current_mood:
         emotion["mood_strength"] = min(1.0, current_strength * 0.55 + intensity * 0.55)
-        emotion["mood_turns_remaining"] = max(emotion.get("mood_turns_remaining", 0), duration)
+        emotion["mood_turns_remaining"] = max(
+            emotion.get("mood_turns_remaining", 0),
+            remaining_after_trigger,
+        )
         emotion["mood_set_at"] = now.isoformat()
         emotion["mood_source"] = str(signal.get("source") or signal.get("reason") or "interaction")
         _clear_pending(emotion)
@@ -796,7 +809,7 @@ def _apply_mood_signal(emotion, signal, now):
 
     emotion["mood"] = new_mood
     emotion["mood_strength"] = intensity
-    emotion["mood_turns_remaining"] = duration
+    emotion["mood_turns_remaining"] = remaining_after_trigger
     emotion["mood_set_at"] = now.isoformat()
     emotion["mood_source"] = str(signal.get("source") or signal.get("reason") or "interaction")
     _clear_pending(emotion)
@@ -807,16 +820,15 @@ def _advance_mood_lifetime(emotion):
     if emotion.get("mood") in (None, "neutral", "tired"):
         return
     remaining = max(0, int(emotion.get("mood_turns_remaining", 0)))
-    if remaining > 0:
+    if remaining > 1:
         emotion["mood_turns_remaining"] = remaining - 1
         return
-    strength = float(emotion.get("mood_strength", 0.0) or 0.0) * 0.55
-    if strength < MIN_SIGNAL_INTENSITY:
-        emotion["mood"] = "neutral"
-        emotion["mood_strength"] = 0.0
-        emotion["mood_source"] = "natural_decay"
-    else:
-        emotion["mood_strength"] = strength
+    # 轮数归零即结束本次短暂主情绪。旧逻辑还会额外按强度拖数轮，
+    # 导致一次害羞在多个无关话题后仍不恢复。
+    emotion["mood"] = "neutral"
+    emotion["mood_strength"] = 0.0
+    emotion["mood_turns_remaining"] = 0
+    emotion["mood_source"] = "natural_decay"
 
 
 def _advance_modifier(emotion, signal):
@@ -905,9 +917,23 @@ def update_emotion(emotion, event=None, interaction=None, consume_energy=True):
         emotion["mood_turns_remaining"] = 0
         emotion["mood_source"] = str(signal.get("reason") or "empathetic_reset")
         _clear_pending(emotion)
+    elif (
+        not has_primary
+        and emotion.get("mood_source") == "proactive"
+        and emotion.get("mood") not in (None, "neutral", "tired")
+    ):
+        # 兼容旧版本留下的主动消息主情绪。新版主动事件只控制本句语气，
+        # 因此启动问候或下一次普通互动时应立即清掉这类残留状态。
+        emotion["mood"] = "neutral"
+        emotion["mood_strength"] = 0.0
+        emotion["mood_turns_remaining"] = 0
+        emotion["mood_source"] = "proactive_transient_recovery"
+        _clear_pending(emotion)
     elif has_primary:
         mood_changed = _apply_mood_signal(emotion, signal, now)
-        if not mood_changed:
+        # 跨正负情绪的弱信号需要连续两轮确认。确认窗口内保留旧情绪，
+        # 避免先闪回 neutral；无关的下一轮会清空 pending 并正常衰减。
+        if not mood_changed and not emotion.get("pending_mood"):
             _advance_mood_lifetime(emotion)
     else:
         _clear_pending(emotion)

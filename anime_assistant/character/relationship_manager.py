@@ -2,6 +2,7 @@ from anime_assistant.infrastructure.storage import safe_load_json, safe_save_jso
 from anime_assistant.infrastructure.paths import DATA_DIR
 from anime_assistant.infrastructure.models import normalize_event_record, normalize_relationship
 from anime_assistant.memory.policy import can_event_affect_state
+from anime_assistant.character.relationship_behavior import sync_relationship_stages
 
 RELATIONSHIP_PATH = str(DATA_DIR / "relationship.json")
 
@@ -10,19 +11,24 @@ def default_relationship():
     return {
         "affection": 30,
         "trust": 30,
-        "familiarity": 10
+        "familiarity": 10,
+        "closeness_stage": "reserved",
+        "openness_stage": "guarded",
+        "familiarity_stage": "new",
     }
 
 
 def load_relationship():
     raw_relationship = safe_load_json(RELATIONSHIP_PATH, default_relationship)
     relationship = normalize_relationship(raw_relationship)
+    sync_relationship_stages(relationship)
     if relationship != raw_relationship:
         safe_save_json(RELATIONSHIP_PATH, relationship)
     return relationship
 
 
 def save_relationship(data):
+    sync_relationship_stages(data)
     normalized = normalize_relationship(data)
     data.clear()
     data.update(normalized)
@@ -47,7 +53,7 @@ def update_relationship(relationship, event):
 
     # Defense in depth: callers cannot accidentally let an inferred, expired,
     # or otherwise untrusted memory mutate persistent relationship state.
-    if event and not can_event_affect_state(event):
+    if event and not isinstance(event, str) and not can_event_affect_state(event):
         return relationship
 
     # 兼容旧调用方式（直接传字符串）
@@ -85,5 +91,6 @@ def update_relationship(relationship, event):
     relationship["affection"] = max(0, min(100, relationship["affection"]))
     relationship["trust"] = max(0, min(100, relationship["trust"]))
     relationship["familiarity"] = max(0, min(100, relationship["familiarity"]))
+    sync_relationship_stages(relationship)
 
     return relationship

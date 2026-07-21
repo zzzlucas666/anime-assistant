@@ -313,11 +313,20 @@ def normalize_emotion(value):
 
 def normalize_relationship(value):
     value = value if isinstance(value, dict) else {}
-    return {
+    normalized = {
         "affection": _number(value.get("affection"), 30, 0.0, 100.0),
         "trust": _number(value.get("trust"), 30, 0.0, 100.0),
         "familiarity": _number(value.get("familiarity"), 10, 0.0, 100.0),
     }
+    stage_values = {
+        "closeness_stage": {"reserved", "friendly", "close"},
+        "openness_stage": {"guarded", "careful", "open"},
+        "familiarity_stage": {"new", "acquainted", "familiar"},
+    }
+    for field, allowed in stage_values.items():
+        if value.get(field) in allowed:
+            normalized[field] = value[field]
+    return normalized
 
 
 def normalize_messages(value):

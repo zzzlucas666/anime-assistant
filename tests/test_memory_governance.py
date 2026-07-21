@@ -64,6 +64,27 @@ class RelationshipPolicyTests(unittest.TestCase):
         self.assertEqual(policy["openness"], "open")
         self.assertEqual(context.get_behavior(), policy)
 
+    def test_relationship_stages_use_exit_hysteresis(self):
+        relationship = {
+            "affection": 68,
+            "trust": 37,
+            "familiarity": 67,
+            "closeness_stage": "close",
+            "openness_stage": "careful",
+            "familiarity_stage": "familiar",
+        }
+        policy = relationship_behavior.build_relationship_policy(relationship)
+
+        self.assertEqual(policy["closeness"], "close")
+        self.assertEqual(policy["openness"], "careful")
+        self.assertEqual(policy["familiarity_level"], "familiar")
+
+        relationship.update({"affection": 64, "trust": 34, "familiarity": 64})
+        policy = relationship_behavior.build_relationship_policy(relationship)
+        self.assertEqual(policy["closeness"], "friendly")
+        self.assertEqual(policy["openness"], "guarded")
+        self.assertEqual(policy["familiarity_level"], "acquainted")
+
 
 class EventProvenanceTests(unittest.TestCase):
     def test_exact_user_evidence_confirms_event(self):
@@ -145,6 +166,26 @@ class EventProvenanceTests(unittest.TestCase):
         candidate = event_record(status="candidate", source="ai_inferred", evidence=[])
         relationship_manager.update_relationship(relationship, candidate)
         self.assertEqual(relationship, {"affection": 30.0, "trust": 30.0, "familiarity": 10.0})
+
+    def test_system_observation_is_background_only(self):
+        observed = event_record(
+            event="用户完成了固定回归测试",
+            source="system_observed",
+            evidence=["regression-suite-42"],
+        )
+        relationship = {"affection": 30, "trust": 30, "familiarity": 10}
+
+        self.assertTrue(is_event_retrievable(observed))
+        self.assertFalse(can_event_affect_state(observed))
+        self.assertEqual(
+            event_context_text(observed),
+            "系统记录：用户完成了固定回归测试",
+        )
+        relationship_manager.update_relationship(relationship, observed)
+        self.assertEqual(
+            relationship,
+            {"affection": 30.0, "trust": 30.0, "familiarity": 10.0},
+        )
 
 
 class ProfileGovernanceTests(unittest.TestCase):
@@ -238,6 +279,49 @@ class ProfileGovernanceTests(unittest.TestCase):
             "evidence": [],
         }])
         self.assertEqual(profile["name"], "Luc")
+
+    def test_lower_priority_direct_action_cannot_replace_explicit_name(self):
+        profile = profile_manager.default_profile()
+        profile_manager.apply_profile_action(
+            profile,
+            "set_name",
+            "Luc",
+            source="user_explicit",
+            evidence=["我叫 Luc"],
+        )
+
+        changed = profile_manager.apply_profile_action(
+            profile,
+            "set_name",
+            "Lucas",
+            source="system_observed",
+            evidence=["account-display-name"],
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(profile["name"], "Luc")
+        self.assertFalse(any(fact["value"] == "Lucas" for fact in profile["facts"]))
+
+    def test_lower_priority_direct_action_cannot_retract_explicit_preference(self):
+        profile = profile_manager.default_profile()
+        profile_manager.apply_profile_action(
+            profile,
+            "add_like",
+            "爵士乐",
+            source="user_explicit",
+            evidence=["我喜欢爵士乐"],
+        )
+
+        changed = profile_manager.apply_profile_action(
+            profile,
+            "remove_like",
+            "爵士乐",
+            source="system_observed",
+            evidence=["recent-play-count-zero"],
+        )
+
+        self.assertFalse(changed)
+        self.assertIn("爵士乐", profile["likes"])
 
 
 class EmbeddingBackfillTests(unittest.TestCase):

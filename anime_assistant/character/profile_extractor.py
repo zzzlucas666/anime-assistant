@@ -1,7 +1,7 @@
 from anime_assistant.ai.client import create_ai_client
 from anime_assistant.infrastructure.models import normalize_profile_extraction, parse_json_object
 from anime_assistant.infrastructure.logging import get_logger
-import re
+from anime_assistant.infrastructure.text_grounding import normalize_grounding_text
 
 logger = get_logger(__name__)
 
@@ -78,8 +78,10 @@ value 必须逐字来自用户输入，禁止补充、改写或推测用户没�
         parsed = parse_json_object(response.choices[0].message.content)
         result = normalize_profile_extraction(parsed)
         value = result.get("value", "")
-        normalize = lambda text: re.sub(r"[^\w\u4e00-\u9fff]+", "", str(text or "").casefold())
-        if result.get("action") != "none" and normalize(value) not in normalize(user_message):
+        if (
+            result.get("action") != "none"
+            and normalize_grounding_text(value) not in normalize_grounding_text(user_message)
+        ):
             logger.warning("资料提取值缺少用户原话证据，已拒绝：%s", value)
             return {"action": "none", "value": ""}
         return result

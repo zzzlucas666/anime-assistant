@@ -35,6 +35,17 @@ class PreferenceRoutingTests(unittest.TestCase):
         )
         self.assertEqual(reply, "你喜欢：摇滚")
 
+    def test_router_describes_neutral_mood_in_natural_language(self):
+        reply = handle_intent(
+            "emotion_query",
+            "你现在开心吗",
+            {},
+            {"mood": "neutral", "energy": 80},
+            {"affection": 30},
+        )
+
+        self.assertEqual(reply, "现在还说不上很开心，心情比较平静。")
+
 
 class ConversationStylePromptTests(unittest.TestCase):
     def test_proactive_emotion_hint_does_not_invent_current_user_input(self):

@@ -8,19 +8,15 @@ from anime_assistant.conversation.context_builder import build_memory_context
 from anime_assistant.infrastructure.models import ALLOWED_VOICE_STYLES
 from anime_assistant.infrastructure.logging import get_logger
 from anime_assistant.character.relationship_behavior import build_relationship_hint
+from anime_assistant.emotion.signals import (
+    EMOTION_CONTROL_REACTIONS,
+    EMOTION_CONTROL_USER_MOODS,
+)
 from anime_assistant.ai.prompts import build_five_layer_prompt, build_turn_emotion_hint
 
 logger = get_logger(__name__)
 
 EMOTION_CONTROL_PREFIX = "<mio:"
-EMOTION_CONTROL_USER_MOODS = {
-    "neutral", "happy", "sad", "anxious", "angry", "lonely",
-    "bored", "stressed", "tired", "disappointed",
-}
-EMOTION_CONTROL_REACTIONS = {
-    "neutral", "happy", "shy", "sad", "worried", "touched",
-    "curious", "surprised", "annoyed",
-}
 EMOTION_CONTROL_PATTERN = re.compile(
     r"<mio:([a-z_]+)\|([a-z_]+)\|([a-z_]+)\|"
     r"([01](?:\.\d+)?)\|([01](?:\.\d+)?)>"

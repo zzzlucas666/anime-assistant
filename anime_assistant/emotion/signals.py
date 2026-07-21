@@ -3,6 +3,16 @@
 from typing import TypedDict
 
 
+EMOTION_CONTROL_USER_MOODS = {
+    "neutral", "happy", "sad", "anxious", "angry", "lonely",
+    "bored", "stressed", "tired", "disappointed",
+}
+EMOTION_CONTROL_REACTIONS = {
+    "neutral", "happy", "shy", "sad", "worried", "touched",
+    "curious", "surprised", "annoyed",
+}
+
+
 class EmotionCandidate(TypedDict):
     """One locally scored interpretation of a user's message."""
 

@@ -1,3 +1,5 @@
+import re
+
 from anime_assistant.ai.client import create_ai_client
 from anime_assistant.infrastructure.models import (
     normalize_emotion,
@@ -6,6 +8,11 @@ from anime_assistant.infrastructure.models import (
     parse_json_object,
 )
 from anime_assistant.infrastructure.logging import get_logger
+from anime_assistant.character.profile_parser import (
+    looks_like_deferred_profile_update,
+    parse_explicit_profile_update,
+)
+from anime_assistant.conversation.types import RouteDecision
 
 logger = get_logger(__name__)
 
@@ -78,6 +85,14 @@ def _looks_like_emotion_query(user_message):
     if _contains_any(user_message, direct_keywords):
         return True
 
+    # 兼容“你现在开心吗 / 你今天累吗”这类在主语和状态之间插入
+    # 时间副词的自然问法，避免依赖穷举完整句子。
+    if _contains_any(user_message, ("吗", "么", "？", "?")) and re.search(
+        r"你(?:现在|今天|这会儿|最近)?(?:开心|高兴|快乐|难过|伤心|不开心|不高兴|害羞|累|疲惫|困)",
+        user_message,
+    ):
+        return True
+
     # “心情怎么样 / 状态如何”这类省略主语的问法，也通常是在问助手。
     short_query_keywords = ("心情怎么样", "状态如何", "感觉如何")
     return _contains_any(user_message, short_query_keywords)
@@ -147,6 +162,67 @@ def _local_detect_intent(user_message):
 
     # 普通聊天是最高频路径：本地直接判定，避免每句话都先跑一次意图识别 AI。
     return _result("chat", 0.9)
+
+
+def plan_local_route(user_message):
+    """Plan all work allowed before the first reply token without calling AI.
+
+    ``detect_intent`` remains as a compatibility API for callers that explicitly
+    want its AI fallback.  The conversation orchestrator uses this stricter
+    route instead: exact commands are handled locally and ambiguous profile
+    statements are verified only after the reply has been delivered.
+    """
+    message = str(user_message or "").strip()
+    if not message:
+        return RouteDecision(confidence=1.0, reason="empty_message")
+
+    if _looks_like_profile_query(message):
+        return RouteDecision(
+            intent="get_profile",
+            confidence=0.95,
+            source="local_rule",
+            router_eligible=True,
+            reason="explicit_profile_query",
+        )
+
+    # 角色喜好必须交给自然聊天生成，不能拿用户档案回答。
+    if _looks_like_assistant_preference_query(message):
+        return RouteDecision(
+            confidence=0.98,
+            source="local_rule",
+            reason="assistant_preference_query",
+        )
+
+    if _looks_like_emotion_query(message):
+        return RouteDecision(
+            intent="emotion_query",
+            confidence=0.95,
+            source="local_rule",
+            router_eligible=True,
+            reason="explicit_emotion_query",
+        )
+
+    profile_update = parse_explicit_profile_update(message)
+    if profile_update is not None:
+        return RouteDecision(
+            intent="set_profile",
+            confidence=profile_update.confidence,
+            source="local_rule",
+            profile_strategy="local",
+            profile_update=profile_update,
+            reason="explicit_profile_update",
+        )
+
+    if looks_like_deferred_profile_update(message):
+        return RouteDecision(
+            intent="set_profile",
+            confidence=0.65,
+            source="local_rule",
+            profile_strategy="deferred_ai",
+            reason="ambiguous_profile_update",
+        )
+
+    return RouteDecision()
 
 
 def detect_intent(api_key, model, user_message, emotion, profile, base_url=None):

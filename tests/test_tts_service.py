@@ -148,6 +148,15 @@ class TTSServiceTests(unittest.TestCase):
             ["うん、分かった。", "今日も頑張ろう！"],
         )
 
+    def test_consecutive_terminal_punctuation_stays_with_spoken_text(self):
+        self.assertEqual(
+            split_sentences("えっ？！そ、そんな急に……恥ずかしいよ……"),
+            ["えっ？！", "そ、そんな急に……恥ずかしいよ……"],
+        )
+
+    def test_punctuation_only_fragments_are_not_synthesized(self):
+        self.assertEqual(split_sentences("……？！"), [])
+
     def test_long_sentence_is_bounded_for_aivis_requests(self):
         sentences = split_sentences("あ" * 130, maximum_chars=56)
         self.assertEqual("".join(sentences), "あ" * 130)
@@ -434,6 +443,48 @@ class TTSServiceTests(unittest.TestCase):
         self.assertEqual(client.closes, 1)
         self.assertEqual(len(ready), 1)
         self.assertEqual(errors, [])
+
+    def test_invalid_text_error_does_not_restart_local_model(self):
+        class InvalidTextClient:
+            endpoint = "local GPT-SoVITS"
+            backend_name = "mio_gpt_sovits_v2proplus"
+            supports_voice_style = True
+            last_error = ""
+
+            def __init__(self):
+                self.calls = 0
+                self.closes = 0
+
+            def is_available(self):
+                return True
+
+            def synthesize(self, *_args, **_kwargs):
+                self.calls += 1
+                raise RuntimeError("请输入有效文本")
+
+            def close(self):
+                self.closes += 1
+
+        client = InvalidTextClient()
+        errors = []
+        service = SpeechSynthesisService.__new__(SpeechSynthesisService)
+        service.config = {"aivis_max_chars_per_request": 56}
+        service.client = client
+        service.fallback_client = None
+        service.translator = None
+        service.local_retry_attempts = 1
+        service.on_audio_ready = lambda _audio: None
+        service.on_error = errors.append
+        service._stop_event = threading.Event()
+        service._jobs = queue.Queue()
+        service._jobs.put(("えっ？！", "shy"))
+        service._jobs.put(None)
+
+        service._run()
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.closes, 0)
+        self.assertEqual(len(errors), 1)
 
     def test_final_error_keeps_primary_and_fallback_causes(self):
         class BrokenPrimary:

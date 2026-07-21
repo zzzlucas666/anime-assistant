@@ -211,6 +211,15 @@ def _supersede(fact, replacement_id, now=None, status="superseded"):
     fact["superseded_by"] = replacement_id
 
 
+def _source_can_mutate(source, facts):
+    """Keep source precedence inside the mutation boundary itself."""
+    incoming_priority = SOURCE_PRIORITY.get(source, 0)
+    return all(
+        incoming_priority >= SOURCE_PRIORITY.get(fact.get("source"), 0)
+        for fact in facts
+    )
+
+
 def apply_profile_action(
     profile,
     action,
@@ -237,14 +246,17 @@ def apply_profile_action(
     target_key = _value_key(value)
 
     if action.startswith("remove_"):
-        changed = False
-        for fact in active:
-            if fact.get("category") == category and _value_key(fact.get("value")) == target_key:
-                _supersede(fact, None, now, status="retracted")
-                changed = True
-        if changed:
-            materialize_profile(profile)
-        return changed
+        matched = [
+            fact for fact in active
+            if fact.get("category") == category
+            and _value_key(fact.get("value")) == target_key
+        ]
+        if not matched or not _source_can_mutate(source, matched):
+            return False
+        for fact in matched:
+            _supersede(fact, None, now, status="retracted")
+        materialize_profile(profile)
+        return True
 
     for fact in active:
         if fact.get("category") == category and _value_key(fact.get("value")) == target_key:
@@ -258,7 +270,6 @@ def apply_profile_action(
                 return fact != before
             return False
 
-    new_fact = _new_fact(category, value, source, confidence, evidence, now)
     displaced = []
     for fact in active:
         same_singleton = category in SINGLETON_CATEGORIES and fact.get("category") == category
@@ -268,6 +279,10 @@ def apply_profile_action(
         )
         if same_singleton or opposite_preference:
             displaced.append(fact)
+    if displaced and not _source_can_mutate(source, displaced):
+        return False
+
+    new_fact = _new_fact(category, value, source, confidence, evidence, now)
     if displaced:
         new_fact["supersedes"] = displaced[-1].get("id")
         for fact in displaced:

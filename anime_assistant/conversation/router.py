@@ -76,6 +76,7 @@ def handle_intent(intent, clean_message, profile, emotion, relationship):
         modifier_strength = emotion.get("modifier_strength", 0.0)
 
         mood_text = {
+            "neutral": "心情比较平静",
             "happy": "心情很好",
             "shy": "有点害羞",
             "sad": "心情不太好",
