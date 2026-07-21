@@ -2,8 +2,7 @@
 
 from openai import OpenAI
 
-
-DEFAULT_BASE_URL = "https://api.deepseek.com"
+from anime_assistant.ai.config import DEFAULT_BASE_URL
 
 
 def create_ai_client(api_key, base_url=None):

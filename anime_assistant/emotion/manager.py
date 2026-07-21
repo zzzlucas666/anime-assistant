@@ -5,6 +5,8 @@ from anime_assistant.infrastructure.storage import safe_load_json, safe_save_jso
 from anime_assistant.infrastructure.paths import DATA_DIR
 from anime_assistant.infrastructure.models import ALLOWED_VOICE_STYLES, normalize_emotion
 from anime_assistant.emotion.signals import (
+    EmotionCandidate,
+    EmotionSignal,
     MODIFIER_DURATIONS,
     MOOD_DURATIONS,
     _base_turn_signal,
@@ -214,7 +216,13 @@ def _emotion_text(text):
     return NEGATED_EMOTION_PATTERN.sub("", text)
 
 
-def _candidate(reaction, voice_style, score, reason, user_mood="neutral"):
+def _candidate(
+    reaction: str,
+    voice_style: str,
+    score: float,
+    reason: str,
+    user_mood: str = "neutral",
+) -> EmotionCandidate:
     return {
         "reaction": reaction,
         "voice_style": voice_style,
@@ -224,7 +232,11 @@ def _candidate(reaction, voice_style, score, reason, user_mood="neutral"):
     }
 
 
-def score_turn_emotion_candidates(user_message, emotion=None, relationship=None):
+def score_turn_emotion_candidates(
+    user_message,
+    emotion=None,
+    relationship=None,
+) -> list[EmotionCandidate]:
     """给本轮生成多个轻量候选；只做本地计算，不增加网络请求。"""
     text = user_message if isinstance(user_message, str) else ""
     emotional_text = _emotion_text(text)
@@ -313,7 +325,11 @@ def score_turn_emotion_candidates(user_message, emotion=None, relationship=None)
     return sorted(deduplicated.values(), key=lambda item: item["score"], reverse=True)
 
 
-def plan_turn_emotion(user_message, emotion=None, relationship=None):
+def plan_turn_emotion(
+    user_message,
+    emotion=None,
+    relationship=None,
+) -> EmotionSignal:
     """在生成回复前规划本轮反应，不依赖 Mio 自己即将生成的措辞。"""
     text = user_message if isinstance(user_message, str) else ""
     emotional_text = _emotion_text(text)

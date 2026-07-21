@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -18,6 +17,29 @@ import uuid
 from anime_assistant.ai.client import create_ai_client
 from anime_assistant.infrastructure.paths import resolve_project_path
 from anime_assistant.infrastructure.logging import get_logger
+from anime_assistant.speech.config import (
+    DEFAULT_AIVIS_ENDPOINT,
+    DEFAULT_AIVIS_MAX_CHARS,
+    DEFAULT_AIVIS_TIMEOUT_SECONDS,
+    DEFAULT_LOCAL_TTS_RETRY_ATTEMPTS,
+    DEFAULT_MIO_GPT_SOVITS_GPT_WEIGHTS,
+    DEFAULT_MIO_GPT_SOVITS_PYTHON,
+    DEFAULT_MIO_GPT_SOVITS_REFERENCES,
+    DEFAULT_MIO_GPT_SOVITS_REPO,
+    DEFAULT_MIO_GPT_SOVITS_SOVITS_WEIGHTS,
+    DEFAULT_MIO_GPT_SOVITS_WORKER,
+    DEFAULT_MIO_TTS_CONFIG,
+    DEFAULT_MIO_TTS_MODEL,
+    DEFAULT_MIO_TTS_PYTHON,
+    DEFAULT_MIO_TTS_REPO,
+    DEFAULT_MIO_TTS_STYLE_VECTORS,
+    DEFAULT_MIO_TTS_WORKER,
+    DEFAULT_MOOD_SPEAKERS,
+    DEFAULT_TTS_BACKEND,
+    MIO_GPT_SOVITS_BACKEND,
+    MIO_TTS_BACKEND,
+)
+from anime_assistant.speech.jobs import SpeechJob, WarmupJob
 from anime_assistant.speech.audio import (
     SpeechAudio,
     build_mouth_envelope,
@@ -32,187 +54,8 @@ from anime_assistant.speech.text import (
 
 logger = get_logger(__name__)
 
-DEFAULT_AIVIS_ENDPOINT = "http://127.0.0.1:10101"
-DEFAULT_AIVIS_TIMEOUT_SECONDS = 60.0
-DEFAULT_AIVIS_MAX_CHARS = 56
-DEFAULT_LOCAL_TTS_RETRY_ATTEMPTS = 1
-DEFAULT_TTS_BACKEND = "aivis"
-MIO_TTS_BACKEND = "mio_style_bert_vits2"
-MIO_GPT_SOVITS_BACKEND = "mio_gpt_sovits_v2proplus"
-DEFAULT_MIO_TTS_PYTHON = (
-    "data/training_tools/Style-Bert-VITS2/venv/Scripts/python.exe"
-)
-DEFAULT_MIO_TTS_WORKER = "anime_assistant/speech/style_bert_worker.py"
-DEFAULT_MIO_TTS_REPO = "data/training_tools/Style-Bert-VITS2"
-DEFAULT_MIO_TTS_MODEL = (
-    "data/mio_voice_dataset/style_bert_vits2/model_assets/mio_pilot_v1/"
-    "mio_pilot_v1_e43_s2000.safetensors"
-)
-DEFAULT_MIO_TTS_CONFIG = (
-    "data/mio_voice_dataset/style_bert_vits2/model_assets/mio_pilot_v1/config.json"
-)
-DEFAULT_MIO_TTS_STYLE_VECTORS = (
-    "data/mio_voice_dataset/style_bert_vits2/model_assets/mio_pilot_v1/"
-    "style_vectors.npy"
-)
-DEFAULT_MIO_GPT_SOVITS_PYTHON = (
-    "data/training_tools/GPT-SoVITS/.venv/Scripts/python.exe"
-)
-DEFAULT_MIO_GPT_SOVITS_WORKER = "anime_assistant/speech/gpt_sovits_worker.py"
-DEFAULT_MIO_GPT_SOVITS_REPO = "data/training_tools/GPT-SoVITS"
-DEFAULT_MIO_GPT_SOVITS_GPT_WEIGHTS = (
-    "data/mio_voice_dataset/gpt_sovits/v2proplus_v1/weights/gpt/"
-    "mio_v2proplus_v1-e15.ckpt"
-)
-DEFAULT_MIO_GPT_SOVITS_SOVITS_WEIGHTS = (
-    "data/mio_voice_dataset/gpt_sovits/v2proplus_v1/weights/sovits/"
-    "mio_v2proplus_v1_e8_s768.pth"
-)
-DEFAULT_MIO_GPT_SOVITS_REFERENCES = {
-    "neutral": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0002.wav"
-        ),
-        "prompt": "今何時だ。おはよう。こんにちは。お昼だぞ。おやつ。",
-    },
-    "happy": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0045.wav"
-        ),
-        "prompt": "うまく演奏できた。ちょっと満足かも。今日は調子いいな。",
-    },
-    "shy": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0021.wav"
-        ),
-        "prompt": "見られてる？夢みたいだ。うまくできたかな。楽しんで。",
-    },
-    "sad": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0046.wav"
-        ),
-        "prompt": "うまく弾けなかった。今日はダメみたいだ。",
-    },
-    "tired": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0047.wav"
-        ),
-        "prompt": "食べ過ぎちゃった。眠くなってきた。",
-    },
-    # 以下是“本句说话方式”，与角色持续 mood 分离。一个音频可以服务于
-    # 相近语气，但每个键都可由用户配置单独替换。
-    "conversational": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0014.wav"
-        ),
-        "prompt": "よし、うまくいったな。うん、ありがとう。じゃあな、また。",
-    },
-    "thoughtful": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0011.wav"
-        ),
-        "prompt": "いろいろあるなぁ。どれにしよう。迷うなぁ。これなんかどうかな。",
-    },
-    "warm": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0014.wav"
-        ),
-        "prompt": "よし、うまくいったな。うん、ありがとう。じゃあな、また。",
-    },
-    "cheerful": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0045.wav"
-        ),
-        "prompt": "うまく演奏できた。ちょっと満足かも。今日は調子いいな。",
-    },
-    "excited": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0026.wav"
-        ),
-        "prompt": "行ってね。ノリノリで、ハイテンションでゴー。飛ばすぞ。全力でついてこい。",
-    },
-    "bashful": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0021.wav"
-        ),
-        "prompt": "見られてる？夢みたいだ。うまくできたかな。楽しんで。",
-    },
-    "embarrassed": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0029.wav"
-        ),
-        "prompt": "恥ずかしい。もう今日は帰ろうかな。こんなんじゃ武道館なんて。",
-    },
-    "concerned": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0011.wav"
-        ),
-        "prompt": "いろいろあるなぁ。どれにしよう。迷うなぁ。これなんかどうかな。",
-    },
-    "reassuring": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0014.wav"
-        ),
-        "prompt": "よし、うまくいったな。うん、ありがとう。じゃあな、また。",
-    },
-    "curious": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0011.wav"
-        ),
-        "prompt": "いろいろあるなぁ。どれにしよう。迷うなぁ。これなんかどうかな。",
-    },
-    "surprised": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0033.wav"
-        ),
-        "prompt": "大凶だ。なんだかドキドキすることがあるかも。テストがうまくいきそう。",
-    },
-    "mild_annoyed": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0030.wav"
-        ),
-        "prompt": "まだまだだな。もうダメかも。なんでだよ。",
-    },
-    "serious": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0030.wav"
-        ),
-        "prompt": "まだまだだな。もうダメかも。なんでだよ。",
-    },
-    "disappointed": {
-        "audio": (
-            "data/mio_voice_dataset/style_bert_vits2/Data/mio_pilot_v1/wavs/"
-            "mio_pilot_0046.wav"
-        ),
-        "prompt": "うまく弾けなかった。今日はダメみたいだ。",
-    },
-}
 _MIO_EVENT_PREFIX = "MIO_TTS_EVENT\t"
-DEFAULT_MOOD_SPEAKERS = {
-    "neutral": 1878365376,  # コハク / ノーマル
-    "happy": 1878365377,    # コハク / あまあま
-    "shy": 1878365377,
-    "sad": 1878365378,      # コハク / せつなめ
-    "tired": 1878365379,    # コハク / ねむたい
-}
+
 
 class AivisSpeechError(RuntimeError):
     """AivisSpeech 无法完成请求。"""
@@ -226,11 +69,8 @@ class MioGPTSoVITSError(RuntimeError):
     """本地 Mio GPT-SoVITS V2ProPlus 进程无法完成请求。"""
 
 
-@dataclass(frozen=True)
-class _WarmupJob:
-    """在正式语音之前加载本地模型，并在结束后继续其他启动任务。"""
-
-    on_complete: object = None
+# Private compatibility alias for tests and older integrations.
+_WarmupJob = WarmupJob
 
 
 class JapaneseSpeechTranslator:
@@ -365,6 +205,7 @@ class MioStyleBertClient:
         self._events = queue.Queue()
         self._reader_thread = None
         self._lock = threading.RLock()
+        self._startup_lock = threading.Lock()
         self._request_lock = threading.Lock()
         self.last_error = ""
 
@@ -422,96 +263,127 @@ class MioStyleBertClient:
                 except OSError:
                     pass
 
-    def close(self):
+    def close(self, force=False):
         with self._lock:
             process = self._process
             self._process = None
-            if process is None:
-                return
-            try:
-                if process.poll() is None and process.stdin is not None:
-                    process.stdin.write('{"command":"shutdown"}\n')
-                    process.stdin.flush()
-                    process.wait(timeout=1.5)
-            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-                pass
+        if process is None:
+            return
+        if force:
             if process.poll() is None:
                 process.terminate()
                 try:
-                    process.wait(timeout=1.5)
+                    process.wait(timeout=0.75)
                 except subprocess.TimeoutExpired:
                     process.kill()
+            return
+        try:
+            if process.poll() is None and process.stdin is not None:
+                process.stdin.write('{"command":"shutdown"}\n')
+                process.stdin.flush()
+                process.wait(timeout=1.5)
+        except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+            pass
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    def cancel(self):
+        """Immediately stop a loading or synthesizing local worker."""
+        self.close(force=True)
 
     def _ensure_process(self):
-        with self._lock:
-            if self._process is not None and self._process.poll() is None:
-                return
-            required = {
-                "Python 3.10": self.python_path,
-                "worker": self.worker_path,
-                "Style-Bert-VITS2": self.repo_path,
-                "model": self.model_path,
-                "config": self.config_path,
-                "style vectors": self.style_vectors_path,
-            }
-            missing = [label for label, path in required.items() if path is None or not Path(path).exists()]
-            if missing:
-                raise MioStyleBertError("Missing Mio TTS files: " + ", ".join(missing))
+        # Serialize startup attempts without blocking close()/cancel().  The
+        # process state lock is held only while publishing a new subprocess;
+        # waiting for model readiness can take minutes and must remain
+        # interruptible by the UI shutdown path.
+        with self._startup_lock:
+            with self._lock:
+                if self._process is not None and self._process.poll() is None:
+                    return
+                required = {
+                    "Python 3.10": self.python_path,
+                    "worker": self.worker_path,
+                    "Style-Bert-VITS2": self.repo_path,
+                    "model": self.model_path,
+                    "config": self.config_path,
+                    "style vectors": self.style_vectors_path,
+                }
+                missing = [
+                    label
+                    for label, path in required.items()
+                    if path is None or not Path(path).exists()
+                ]
+                if missing:
+                    raise MioStyleBertError(
+                        "Missing Mio TTS files: " + ", ".join(missing)
+                    )
 
-            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-            event_queue = queue.Queue()
-            self._events = event_queue
-            env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
-            env["TOKENIZERS_PARALLELISM"] = "false"
-            command = [
-                str(self.python_path),
-                str(self.worker_path),
-                "--repo", str(self.repo_path),
-                "--model", str(self.model_path),
-                "--config", str(self.config_path),
-                "--style-vectors", str(self.style_vectors_path),
-                "--output-dir", str(self.output_dir),
-                "--device", self.device,
-                "--sdp-ratio", str(self.sdp_ratio),
-                "--noise", str(self.noise),
-                "--noise-w", str(self.noise_w),
-                "--style-weight", str(self.style_weight),
-            ]
-            try:
-                self._process = subprocess.Popen(
-                    command,
-                    cwd=str(self.repo_path),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
-                    env=env,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+                event_queue = queue.Queue()
+                self._events = event_queue
+                env = os.environ.copy()
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["TOKENIZERS_PARALLELISM"] = "false"
+                command = [
+                    str(self.python_path),
+                    str(self.worker_path),
+                    "--repo", str(self.repo_path),
+                    "--model", str(self.model_path),
+                    "--config", str(self.config_path),
+                    "--style-vectors", str(self.style_vectors_path),
+                    "--output-dir", str(self.output_dir),
+                    "--device", self.device,
+                    "--sdp-ratio", str(self.sdp_ratio),
+                    "--noise", str(self.noise),
+                    "--noise-w", str(self.noise_w),
+                    "--style-weight", str(self.style_weight),
+                ]
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=str(self.repo_path),
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                        env=env,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except OSError as exc:
+                    raise MioStyleBertError(
+                        f"Cannot start Mio TTS worker: {exc}"
+                    ) from exc
+
+                self._process = process
+                self._reader_thread = threading.Thread(
+                    target=self._read_worker_output,
+                    args=(process, event_queue),
+                    name="mio-tts-output",
+                    daemon=True,
                 )
-            except OSError as exc:
-                self._process = None
-                raise MioStyleBertError(f"Cannot start Mio TTS worker: {exc}") from exc
+                self._reader_thread.start()
 
-            self._reader_thread = threading.Thread(
-                target=self._read_worker_output,
-                args=(self._process, event_queue),
-                name="mio-tts-output",
-                daemon=True,
-            )
-            self._reader_thread.start()
             try:
                 event = self._wait_for_event(
                     None,
                     self.startup_timeout,
                     phase="startup",
+                    event_queue=event_queue,
                 )
             except Exception:
                 self.close()
                 raise
+            with self._lock:
+                process_is_current = self._process is process
+            if not process_is_current or process.poll() is not None:
+                raise MioStyleBertError("Mio TTS worker stopped during startup")
             if event.get("type") != "ready":
                 message = event.get("message") or "Mio TTS worker exited during startup"
                 self.close()
@@ -541,7 +413,14 @@ class MioStyleBertClient:
                 logger.debug("[Mio TTS] %s", line)
         event_queue.put({"type": "eof", "message": "Mio TTS worker stopped"})
 
-    def _wait_for_event(self, request_id, timeout, phase="operation"):
+    def _wait_for_event(
+        self,
+        request_id,
+        timeout,
+        phase="operation",
+        event_queue=None,
+    ):
+        events = event_queue if event_queue is not None else self._events
         deadline = time.monotonic() + timeout
         timeout_message = (
             f"{self.backend_display_name} {phase} timed out after {timeout:.0f}s"
@@ -551,7 +430,7 @@ class MioStyleBertClient:
             if remaining <= 0:
                 raise MioStyleBertError(timeout_message)
             try:
-                event = self._events.get(timeout=remaining)
+                event = events.get(timeout=remaining)
             except queue.Empty as exc:
                 raise MioStyleBertError(timeout_message) from exc
             event_id = event.get("id")
@@ -678,87 +557,94 @@ class MioGPTSoVITSClient(MioStyleBertClient):
                     pass
 
     def _ensure_process(self):
-        with self._lock:
-            if self._process is not None and self._process.poll() is None:
-                return
-            required = {
-                "Python 3.10": self.python_path,
-                "worker": self.worker_path,
-                "GPT-SoVITS": self.repo_path,
-                "GPT e15 weights": self.gpt_weights_path,
-                "SoVITS e8 weights": self.sovits_weights_path,
-            }
-            for mood, reference in self.references.items():
-                required[f"{mood} reference"] = Path(reference["audio"])
-            missing = [
-                label
-                for label, path in required.items()
-                if path is None or not Path(path).exists()
-            ]
-            if missing:
-                raise MioGPTSoVITSError(
-                    "Missing GPT-SoVITS files: " + ", ".join(missing)
-                )
+        with self._startup_lock:
+            with self._lock:
+                if self._process is not None and self._process.poll() is None:
+                    return
+                required = {
+                    "Python 3.10": self.python_path,
+                    "worker": self.worker_path,
+                    "GPT-SoVITS": self.repo_path,
+                    "GPT e15 weights": self.gpt_weights_path,
+                    "SoVITS e8 weights": self.sovits_weights_path,
+                }
+                for mood, reference in self.references.items():
+                    required[f"{mood} reference"] = Path(reference["audio"])
+                missing = [
+                    label
+                    for label, path in required.items()
+                    if path is None or not Path(path).exists()
+                ]
+                if missing:
+                    raise MioGPTSoVITSError(
+                        "Missing GPT-SoVITS files: " + ", ".join(missing)
+                    )
 
-            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-            event_queue = queue.Queue()
-            self._events = event_queue
-            env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
-            env["PYTHONUTF8"] = "1"
-            env["TOKENIZERS_PARALLELISM"] = "false"
-            command = [
-                str(self.python_path),
-                str(self.worker_path),
-                "--repo",
-                str(self.repo_path),
-                "--gpt-weights",
-                str(self.gpt_weights_path),
-                "--sovits-weights",
-                str(self.sovits_weights_path),
-                "--references",
-                json.dumps(self.references, ensure_ascii=False),
-                "--output-dir",
-                str(self.output_dir),
-                "--device",
-                self.device,
-            ]
-            try:
-                self._process = subprocess.Popen(
-                    command,
-                    cwd=str(self.repo_path),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
-                    env=env,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-            except OSError as exc:
-                self._process = None
-                raise MioGPTSoVITSError(
-                    f"Cannot start GPT-SoVITS worker: {exc}"
-                ) from exc
+                Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+                event_queue = queue.Queue()
+                self._events = event_queue
+                env = os.environ.copy()
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
+                env["TOKENIZERS_PARALLELISM"] = "false"
+                command = [
+                    str(self.python_path),
+                    str(self.worker_path),
+                    "--repo",
+                    str(self.repo_path),
+                    "--gpt-weights",
+                    str(self.gpt_weights_path),
+                    "--sovits-weights",
+                    str(self.sovits_weights_path),
+                    "--references",
+                    json.dumps(self.references, ensure_ascii=False),
+                    "--output-dir",
+                    str(self.output_dir),
+                    "--device",
+                    self.device,
+                ]
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=str(self.repo_path),
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                        env=env,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except OSError as exc:
+                    raise MioGPTSoVITSError(
+                        f"Cannot start GPT-SoVITS worker: {exc}"
+                    ) from exc
 
-            self._reader_thread = threading.Thread(
-                target=self._read_worker_output,
-                args=(self._process, event_queue),
-                name="mio-gpt-sovits-output",
-                daemon=True,
-            )
-            self._reader_thread.start()
+                self._process = process
+                self._reader_thread = threading.Thread(
+                    target=self._read_worker_output,
+                    args=(process, event_queue),
+                    name="mio-gpt-sovits-output",
+                    daemon=True,
+                )
+                self._reader_thread.start()
+
             try:
                 event = self._wait_for_event(
                     None,
                     self.startup_timeout,
                     phase="startup",
+                    event_queue=event_queue,
                 )
             except Exception:
                 self.close()
                 raise
+            with self._lock:
+                process_is_current = self._process is process
+            if not process_is_current or process.poll() is not None:
+                raise MioGPTSoVITSError("GPT-SoVITS worker stopped during startup")
             if event.get("type") != "ready":
                 message = event.get("message") or "GPT-SoVITS worker failed to start"
                 self.close()
@@ -768,6 +654,9 @@ class MioGPTSoVITSClient(MioStyleBertClient):
                 self.gpt_weights_path.name,
                 self.sovits_weights_path.name,
             )
+
+
+
 
 
 class SpeechSynthesisService:
@@ -825,7 +714,7 @@ class SpeechSynthesisService:
         ):
             return False
         try:
-            self._jobs.put_nowait(_WarmupJob(on_complete=on_complete))
+            self._jobs.put_nowait(WarmupJob(on_complete=on_complete))
             return True
         except queue.Full:
             logger.warning("TTS 队列已满，无法安排本地模型预热")
@@ -851,14 +740,14 @@ class SpeechSynthesisService:
             return False
         try:
             self._jobs.put_nowait(
-                (
-                    text,
-                    mood,
-                    emotion_strength,
-                    modifier,
-                    fatigue_strength,
-                    voice_style,
-                    voice_style_strength,
+                SpeechJob(
+                    text=text,
+                    mood=mood,
+                    emotion_strength=emotion_strength,
+                    modifier=modifier,
+                    fatigue_strength=fatigue_strength,
+                    voice_style=voice_style,
+                    voice_style_strength=voice_style_strength,
                 )
             )
             return True
@@ -877,6 +766,10 @@ class SpeechSynthesisService:
         except queue.Full:
             pass
         for client in (self.client, getattr(self, "fallback_client", None)):
+            cancel = getattr(client, "cancel", None)
+            if callable(cancel):
+                cancel()
+                continue
             close = getattr(client, "close", None)
             if callable(close):
                 close()
@@ -887,34 +780,17 @@ class SpeechSynthesisService:
             job = self._jobs.get()
             if job is None:
                 return
-            if isinstance(job, _WarmupJob):
+            if isinstance(job, WarmupJob):
                 self._run_warmup(job)
                 continue
-            if len(job) >= 7:
-                (
-                    text,
-                    mood,
-                    emotion_strength,
-                    modifier,
-                    fatigue_strength,
-                    voice_style,
-                    voice_style_strength,
-                ) = job[:7]
-            elif len(job) >= 6:
-                text, mood, emotion_strength, modifier, fatigue_strength, voice_style = job[:6]
-                voice_style_strength = 0.6
-            elif len(job) >= 5:
-                text, mood, emotion_strength, modifier, fatigue_strength = job[:5]
-                voice_style = None
-                voice_style_strength = 0.6
-            else:
-                # 兼容旧测试、旧队列和可能仍在运行的调用方。
-                text, mood = job
-                emotion_strength = 1.0
-                modifier = "none"
-                fatigue_strength = 0.0
-                voice_style = None
-                voice_style_strength = 0.6
+            speech_job = SpeechJob.from_legacy(job)
+            text = speech_job.text
+            mood = speech_job.mood
+            emotion_strength = speech_job.emotion_strength
+            modifier = speech_job.modifier
+            fatigue_strength = speech_job.fatigue_strength
+            voice_style = speech_job.voice_style
+            voice_style_strength = speech_job.voice_style_strength
             voice_style = self._effective_voice_style(
                 mood,
                 emotion_strength,
@@ -1027,7 +903,9 @@ class SpeechSynthesisService:
             )
             self._notify_status("ready")
         finally:
-            if callable(job.on_complete):
+            # Closing during a cold start must not launch the next expensive
+            # warmup task after the window has already begun shutting down.
+            if not self._stop_event.is_set() and callable(job.on_complete):
                 try:
                     job.on_complete()
                 except Exception as exc:
