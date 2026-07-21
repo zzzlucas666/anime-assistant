@@ -209,6 +209,39 @@ class InteractionEmotionTests(unittest.TestCase):
 
         self.assertEqual(calibrated, planned)
 
+    def test_weak_local_distress_cannot_be_calibrated_to_happy(self):
+        planned = {
+            "mood": "neutral",
+            "intensity": 0.0,
+            "duration_turns": 0,
+            "modifier": "worried",
+            "modifier_strength": 0.52,
+            "modifier_duration_turns": 2,
+            "voice_style": "concerned",
+            "voice_style_strength": 0.52,
+            "user_mood": "sad",
+            "user_intensity": 0.52,
+            "reset_primary": True,
+            "reason": "implicit_user_distress",
+            "source": "user_input",
+            "confidence": 0.58,
+            "candidates": [],
+            "decision_source": "local_candidates",
+        }
+
+        calibrated = apply_ai_emotion_control(planned, {
+            "user_mood": "neutral",
+            "reaction": "happy",
+            "voice_style": "cheerful",
+            "strength": 0.82,
+            "confidence": 0.91,
+        })
+
+        self.assertEqual(calibrated["user_mood"], "sad")
+        self.assertEqual(calibrated["mood"], "neutral")
+        self.assertEqual(calibrated["modifier"], "worried")
+        self.assertEqual(calibrated["voice_style"], "concerned")
+
 
 class EmotionTransitionTests(unittest.TestCase):
     def test_happy_and_shy_can_transition_directly(self):
@@ -258,9 +291,22 @@ class EmotionTransitionTests(unittest.TestCase):
         state["mood_turns_remaining"] = 1
 
         update_emotion(state)
-        self.assertEqual(state["mood"], "happy")
+        self.assertEqual(state["mood"], "neutral")
+
+    def test_duration_includes_trigger_turn_and_does_not_overstay(self):
+        state = emotion_state()
+
+        update_emotion(
+            state,
+            interaction={"mood": "shy", "intensity": 0.76, "duration_turns": 3},
+        )
+        self.assertEqual(state["mood"], "shy")
+        self.assertEqual(state["mood_turns_remaining"], 2)
+
         update_emotion(state)
-        self.assertEqual(state["mood"], "happy")
+        self.assertEqual(state["mood"], "shy")
+        self.assertEqual(state["mood_turns_remaining"], 1)
+
         update_emotion(state)
         self.assertEqual(state["mood"], "neutral")
 
@@ -308,7 +354,7 @@ class ProactiveEmotionTests(unittest.TestCase):
         self.assertEqual(signal["voice_style"], "concerned")
         self.assertEqual(signal["source"], "proactive")
 
-    def test_happy_event_gives_proactive_message_cheerful_voice(self):
+    def test_happy_event_gives_proactive_message_transient_cheerful_voice(self):
         signal = plan_proactive_emotion(
             "有个好消息想告诉你。",
             {
@@ -320,8 +366,42 @@ class ProactiveEmotionTests(unittest.TestCase):
             emotion_state(),
         )
 
-        self.assertEqual(signal["mood"], "happy")
+        self.assertEqual(signal["mood"], "neutral")
         self.assertEqual(signal["voice_style"], "cheerful")
+
+    def test_old_shy_event_does_not_renew_persistent_shyness(self):
+        state = emotion_state("shy", 0.76)
+        state["mood_turns_remaining"] = 1
+        signal = plan_proactive_emotion(
+            "刚才的话还是让我有点不好意思。",
+            {
+                "top_event": {
+                    "emotion": "shy",
+                    "user_emotion": "happy",
+                }
+            },
+            state,
+        )
+
+        self.assertEqual(signal["mood"], "neutral")
+        self.assertEqual(signal["voice_style"], "bashful")
+
+        update_emotion(state, interaction=signal)
+        self.assertEqual(state["mood"], "neutral")
+
+    def test_legacy_proactive_primary_is_cleared_on_next_neutral_update(self):
+        state = emotion_state("shy", 0.79)
+        state["mood_source"] = "proactive"
+        state["mood_turns_remaining"] = 2
+
+        update_emotion(
+            state,
+            interaction=plan_proactive_emotion("啊，你来了。", {}, state),
+            consume_energy=False,
+        )
+
+        self.assertEqual(state["mood"], "neutral")
+        self.assertEqual(state["mood_source"], "proactive_transient_recovery")
 
     def test_idle_contact_uses_warm_voice_without_forcing_a_mood(self):
         signal = plan_proactive_emotion(

@@ -69,6 +69,19 @@ class MioGPTSoVITSError(RuntimeError):
     """本地 Mio GPT-SoVITS V2ProPlus 进程无法完成请求。"""
 
 
+_NON_RETRYABLE_TTS_ERROR_MARKERS = (
+    "请输入有效文本",
+    "empty gpt-sovits request",
+    "no speakable text",
+)
+
+
+def _is_non_retryable_tts_error(exc):
+    """Return whether restarting the model cannot change this input error."""
+    message = str(exc or "").strip().casefold()
+    return any(marker.casefold() in message for marker in _NON_RETRYABLE_TTS_ERROR_MARKERS)
+
+
 # Private compatibility alias for tests and older integrations.
 _WarmupJob = WarmupJob
 
@@ -980,6 +993,10 @@ class SpeechSynthesisService:
                     speed_multiplier=speed_multiplier,
                 )
             except Exception as exc:
+                # 文本前端已经明确拒绝输入时，重启二十多秒后仍会得到同样
+                # 结果。直接交给备用后端，避免无意义的模型重载。
+                if _is_non_retryable_tts_error(exc):
+                    raise
                 if attempt >= retry_attempts or self._stop_event.is_set():
                     raise
                 logger.warning(

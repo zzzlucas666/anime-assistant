@@ -30,7 +30,6 @@ class OrchestratorSnapshotTests(unittest.TestCase):
 
         try:
             with (
-                patch("anime_assistant.conversation.orchestrator.detect_intent", return_value={"intent": "chat", "confidence": 1.0}),
                 patch("anime_assistant.conversation.orchestrator.save_memory", side_effect=preserve_history),
                 patch("anime_assistant.conversation.orchestrator.update_last_interaction_time"),
             ):
@@ -100,7 +99,6 @@ class OrchestratorSnapshotTests(unittest.TestCase):
 
         try:
             with (
-                patch("anime_assistant.conversation.orchestrator.detect_intent", return_value={"intent": "chat", "confidence": 1.0}),
                 patch("anime_assistant.conversation.orchestrator.save_memory", side_effect=lambda items: (items, [])),
                 patch("anime_assistant.conversation.orchestrator.update_last_interaction_time"),
             ):

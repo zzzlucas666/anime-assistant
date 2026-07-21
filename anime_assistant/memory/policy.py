@@ -1,10 +1,13 @@
 """Trust, lifecycle, and rendering rules for persisted memories."""
 
 import datetime
-import re
+
+from anime_assistant.infrastructure.text_grounding import normalize_grounding_text
 
 
-TRUSTED_FACT_SOURCES = {"user_explicit", "user_corrected", "system_observed"}
+USER_ASSERTED_FACT_SOURCES = {"user_explicit", "user_corrected"}
+TRUSTED_FACT_SOURCES = USER_ASSERTED_FACT_SOURCES | {"system_observed"}
+STATE_MUTATING_FACT_SOURCES = USER_ASSERTED_FACT_SOURCES
 RETRIEVABLE_STATUSES = {"confirmed", "legacy"}
 STATE_MUTATING_STATUSES = {"confirmed"}
 
@@ -35,14 +38,10 @@ def utc_now_iso(now=None):
     return current.isoformat(timespec="seconds")
 
 
-def _normalized_evidence_text(value):
-    return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(value or "").casefold())
-
-
 def evidence_is_grounded(evidence, user_message):
     """Only an exact, meaningful span of the user's message counts as evidence."""
-    evidence_text = _normalized_evidence_text(evidence)
-    user_text = _normalized_evidence_text(user_message)
+    evidence_text = normalize_grounding_text(evidence)
+    user_text = normalize_grounding_text(user_message)
     return len(evidence_text) >= 2 and evidence_text in user_text
 
 
@@ -93,7 +92,7 @@ def build_provenance(extraction, user_message, now=None):
     requested_source = extraction.get("source")
     evidence = str(extraction.get("evidence") or "").strip()
     grounded = (
-        requested_source in {"user_explicit", "user_corrected"}
+        requested_source in USER_ASSERTED_FACT_SOURCES
         and evidence_is_grounded(evidence, user_message)
     )
     if grounded:
@@ -133,7 +132,7 @@ def build_provenance(extraction, user_message, now=None):
 def is_event_retrievable(event, now=None):
     event = apply_lifecycle_defaults(event, now)
     has_required_evidence = (
-        event.get("source") not in {"user_explicit", "user_corrected"}
+        event.get("source") not in USER_ASSERTED_FACT_SOURCES
         or any(isinstance(item, str) and item.strip() for item in event.get("evidence", []))
     )
     return (
@@ -156,21 +155,26 @@ def memory_trust_tier(event, now=None):
         return None
     if (
         event.get("status") == "confirmed"
-        and event.get("source") in {"user_explicit", "user_corrected"}
+        and event.get("source") in USER_ASSERTED_FACT_SOURCES
     ):
         return "high"
     return "medium"
 
 
 def can_event_affect_state(event, now=None):
+    """Only confirmed user-asserted facts may mutate persistent relationship state.
+
+    ``system_observed`` remains retrievable as medium-trust background, but a
+    future observer cannot silently turn an operational observation into a
+    relationship change without a separate confirmation policy.
+    """
     event = apply_lifecycle_defaults(event, now)
-    has_required_evidence = (
-        event.get("source") not in {"user_explicit", "user_corrected"}
-        or any(isinstance(item, str) and item.strip() for item in event.get("evidence", []))
+    has_required_evidence = any(
+        isinstance(item, str) and item.strip() for item in event.get("evidence", [])
     )
     return (
         event.get("status") in STATE_MUTATING_STATUSES
-        and event.get("source") in TRUSTED_FACT_SOURCES
+        and event.get("source") in STATE_MUTATING_FACT_SOURCES
         and has_required_evidence
     )
 
@@ -179,8 +183,17 @@ def event_context_text(event):
     """Prefer verified source evidence over an AI-authored paraphrase."""
     event = event if isinstance(event, dict) else {}
     evidence = event.get("evidence")
-    if event.get("source") in TRUSTED_FACT_SOURCES and isinstance(evidence, list):
+    source = event.get("source")
+    if source in USER_ASSERTED_FACT_SOURCES and isinstance(evidence, list):
         grounded = next((item.strip() for item in evidence if isinstance(item, str) and item.strip()), "")
         if grounded:
             return f"对方曾明确说：{grounded}"
+    if source == "system_observed":
+        observation = str(event.get("event") or "").strip()
+        if not observation and isinstance(evidence, list):
+            observation = next(
+                (item.strip() for item in evidence if isinstance(item, str) and item.strip()),
+                "",
+            )
+        return f"系统记录：{observation}" if observation else ""
     return str(event.get("event") or "").strip()

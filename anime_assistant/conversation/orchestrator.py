@@ -12,14 +12,13 @@ main.py 不再直接调用各个 manager，只负责：
 不用再复制一遍 main.py 里的逻辑。
 """
 
-from concurrent.futures import ThreadPoolExecutor
 import copy
 import queue
 import re
 import threading
 import time
 
-from anime_assistant.conversation.intent_manager import detect_intent
+from anime_assistant.conversation.intent_manager import plan_local_route
 from anime_assistant.ai.fallbacks import is_transient_fallback
 from anime_assistant.character.profile_extractor import extract_profile_info
 from anime_assistant.conversation.router import handle_intent
@@ -73,8 +72,6 @@ class ConversationOrchestrator:
         # 如果没传进来（比如单独测试这个类），就自己建一把，保证不报错。
         self.lock = lock if lock is not None else threading.Lock()
         self.on_state_updated = on_state_updated
-        # 给意图识别 + 资料提取并行用的小线程池，常驻即可，不用每轮新建
-        self._executor = ThreadPoolExecutor(max_workers=2)
         # 累积本轮（用户消息+助手消息）产生的溢出消息，finalize_turn 结束时统一交给长期摘要
         self._pending_overflow = []
         # 事件提取、情绪/关系更新和长期摘要按对话顺序在单一 daemon
@@ -97,59 +94,47 @@ class ConversationOrchestrator:
             .strip()
         )
 
-    @staticmethod
-    def _looks_like_profile_update(clean_message):
-        """
-        只有用户明显在更新个人资料时，才调用 profile_extractor。
+    def _apply_profile_update(self, profile_info, confidence, user_message=""):
+        """Apply a user-evidenced profile action and report whether state changed."""
+        if not isinstance(profile_info, dict) or confidence <= 0.5:
+            return False
 
-        之前每轮普通聊天都会额外打一条“资料提取”AI请求；虽然它跟意图识别并行，
-        但仍然会增加网络/CPU压力。这里先用保守关键词挡一下，不影响常见资料更新。
-        """
-        profile_keywords = (
-            "我喜欢", "我爱", "我讨厌", "我不喜欢", "我反感",
-            "我不再喜欢", "我现在不喜欢", "我不再讨厌", "我现在不讨厌",
-            "以前喜欢", "以前讨厌", "记错了", "更正一下", "改成",
-            "我叫", "我的名字是", "我的名字叫", "我名字是", "我名字叫",
-            "你可以叫我", "以后叫我", "叫我", "我的昵称",
-        )
-        return any(keyword in clean_message for keyword in profile_keywords)
-
-    def _apply_profile_update(self, intent, confidence, profile_info, user_message=""):
-        """根据 profile_extractor 的结果更新 profile（如果置信度够高）"""
         action = profile_info.get("action")
         value = profile_info.get("value")
+        if action == "none" or not value:
+            return False
 
-        if intent != "set_profile" or confidence <= 0.5:
-            return
-
-        if action != "none" and value:
-            correction_markers = ("不再", "现在不", "更正", "记错", "改成", "不是")
-            source = (
-                "user_corrected"
-                if action.startswith("remove_") or any(marker in user_message for marker in correction_markers)
-                else "user_explicit"
-            )
-            apply_profile_action(
-                self.profile,
-                action,
-                value,
-                source=source,
-                confidence=confidence,
-                evidence=[user_message] if user_message else [value],
-            )
+        correction_markers = ("不再", "现在不", "更正", "记错", "改成", "不是")
+        source = (
+            "user_corrected"
+            if action.startswith("remove_") or any(marker in user_message for marker in correction_markers)
+            else "user_explicit"
+        )
+        changed = apply_profile_action(
+            self.profile,
+            action,
+            value,
+            source=source,
+            confidence=confidence,
+            evidence=[user_message] if user_message else [value],
+        )
+        if changed:
             save_profile(self.profile)
+        return changed
 
     def prepare_turn(self, user_message):
         """
-        处理输入清洗、意图识别、资料提取（并行执行），
-        并判断本轮要不要走 router 精确回复。
+        处理输入清洗和纯本地路由，并判断本轮要不要走 router 精确回复。
+
+        首字前不允许进行额外 AI 意图识别或资料提取。明确资料直接本地
+        解析；模糊资料只登记为回复后的后台任务。
         返回一个 dict，供 stream_reply / finalize_turn 使用。
         """
         started_at = time.perf_counter()
         clean_message = self._clean_input(user_message)
+        route = plan_local_route(user_message)
         with self.lock:
             intent_emotion_snapshot = copy.deepcopy(self.emotion)
-            intent_profile_snapshot = copy.deepcopy(self.profile)
             relationship_snapshot = copy.deepcopy(self.relationship)
 
         # 回复生成前先规划“用户现在是什么感受、Mio 本轮该如何反应”。
@@ -162,38 +147,22 @@ class ConversationOrchestrator:
             relationship_snapshot,
         )
 
-        # detect_intent 和 extract_profile_info 互不依赖，并行执行省一次往返延迟。
-        # 但普通聊天没必要每轮都做资料提取，先用关键词过滤，减少一部分前置AI调用。
-        intent_future = self._executor.submit(
-            detect_intent,
-            self.config['api_key'],
-            self.config['model'],
-            clean_message,
-            intent_emotion_snapshot,
-            intent_profile_snapshot,
-            self.config.get("base_url"),
-        )
-        profile_future = None
-        if self._looks_like_profile_update(clean_message):
-            profile_future = self._executor.submit(
-                extract_profile_info,
-                self.config['api_key'],
-                self.config['model'],
-                clean_message,
-                self.config.get("base_url"),
-            )
-
-        intent_result = intent_future.result()
-        profile_info = profile_future.result() if profile_future else {"action": "none", "value": ""}
-
-        intent = intent_result.get("intent", "")
-        confidence = intent_result.get("confidence", 0)
+        intent = route.intent
+        confidence = route.confidence
 
         # 接下来要修改共享状态（profile/conversation_history）和写文件，
         # 跟 InitiativeEngine 的后台检查共用同一把锁，避免并发写冲突。
-        # AI调用本身（上面的 intent/profile_info）不占锁，不阻塞后台线程。
+        # 这里没有 AI 调用；锁只保护短暂的内存/文件状态变更。
         with self.lock:
-            self._apply_profile_update(intent, confidence, profile_info, clean_message)
+            profile_changed = False
+            if route.profile_strategy == "local" and route.profile_update is not None:
+                profile_changed = self._apply_profile_update(
+                    route.profile_update.as_result(),
+                    route.profile_update.confidence,
+                    str(user_message or "").strip(),
+                )
+                if profile_changed:
+                    self.context.update(self.emotion, self.profile, self.relationship)
 
             # 记录用户消息
             self.conversation_history.append({"role": "user", "content": clean_message})
@@ -212,11 +181,20 @@ class ConversationOrchestrator:
             )
             context_snapshot = copy.deepcopy(self.context.get_context())
             context_snapshot["turn_emotion"] = copy.deepcopy(turn_emotion)
+            router_profile_snapshot = copy.deepcopy(self.profile)
+            router_emotion_snapshot = copy.deepcopy(self.emotion)
+            router_relationship_snapshot = copy.deepcopy(self.relationship)
 
         # 精确查表类回复（询问喜好/昵称/情绪状态等），优先查表，查不到再退回 AI
         router_reply = None
-        if intent in ("get_profile", "emotion_query") and confidence > 0.5:
-            router_reply = handle_intent(intent, clean_message, self.profile, self.emotion, self.relationship)
+        if route.router_eligible and confidence > 0.5:
+            router_reply = handle_intent(
+                intent,
+                clean_message,
+                router_profile_snapshot,
+                router_emotion_snapshot,
+                router_relationship_snapshot,
+            )
 
         prepared = {
             "clean_message": clean_message,
@@ -227,11 +205,18 @@ class ConversationOrchestrator:
             "conversation_snapshot": conversation_snapshot,
             "context_snapshot": context_snapshot,
             "turn_emotion": turn_emotion,
+            "route_source": route.source,
+            "route_reason": route.reason,
+            "profile_strategy": route.profile_strategy,
+            "profile_changed": profile_changed,
         }
         logger.info(
-            "[PERF] prepare_turn intent=%s profile_extract=%s duration=%.3fs",
+            "[PERF] prepare_turn intent=%s route_source=%s route_reason=%s "
+            "profile_strategy=%s preflight_ai=0 duration=%.3fs",
             intent,
-            bool(profile_future),
+            route.source,
+            route.reason,
+            route.profile_strategy,
             time.perf_counter() - started_at,
         )
         return prepared
@@ -357,6 +342,7 @@ class ConversationOrchestrator:
                 "router_reply": router_reply,
                 "interaction_emotion": interaction_emotion,
                 "immediate_emotion_applied": immediate_emotion_applied,
+                "profile_strategy": prepared.get("profile_strategy", "none"),
             })
 
         logger.info(
@@ -383,6 +369,18 @@ class ConversationOrchestrator:
     def _postprocess_turn(self, task):
         started_at = time.perf_counter()
         router_reply = task["router_reply"]
+        profile_info = None
+        profile_duration = 0.0
+        if task.get("profile_strategy") == "deferred_ai":
+            profile_started_at = time.perf_counter()
+            profile_info = extract_profile_info(
+                self.config['api_key'],
+                self.config['model'],
+                task["clean_message"],
+                self.config.get("base_url"),
+            )
+            profile_duration = time.perf_counter() - profile_started_at
+
         event = None
         event_duration = 0.0
         if not router_reply:
@@ -399,6 +397,14 @@ class ConversationOrchestrator:
         state_changed = False
         event_can_mutate_state = can_event_affect_state(event)
         with self.lock:
+            if profile_info is not None:
+                profile_changed = self._apply_profile_update(
+                    profile_info,
+                    0.8,
+                    task["clean_message"],
+                )
+                state_changed = state_changed or profile_changed
+
             # 即时信号已在 finalize_turn 应用时，不再让稍后返回的长期事件
             # 标签覆盖它，也避免同一轮重复消耗精力。
             if not task.get("immediate_emotion_applied", False) and event_can_mutate_state:
@@ -429,7 +435,9 @@ class ConversationOrchestrator:
             self.config.get("base_url"),
         )
         logger.info(
-            "[PERF] postprocess_turn event=%.3fs summary_check=%.3fs summarized=%s total=%.3fs",
+            "[PERF] postprocess_turn profile=%.3fs event=%.3fs "
+            "summary_check=%.3fs summarized=%s total=%.3fs",
+            profile_duration,
             event_duration,
             time.perf_counter() - summary_started_at,
             summarized,
@@ -442,4 +450,3 @@ class ConversationOrchestrator:
             self.on_state_updated = None
             self._postprocess_queue.put(None)
         self._postprocess_thread.join(timeout=2)
-        self._executor.shutdown(wait=False)

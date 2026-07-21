@@ -66,7 +66,8 @@ main.py / main_gui.py（兼容入口）
 ## 记忆治理
 
 - 事件记录统一包含 `type`、`status`、`source`、`confidence`、`evidence`、`expires_at` 和 Embedding 版本信息。
-- `user_explicit`、`user_corrected` 和 `system_observed` 是可信来源；AI 无法给出用户原话证据时，记录降级为 `ai_inferred + candidate`。
+- `user_explicit`、`user_corrected` 和 `system_observed` 可以进入可信记忆检索；AI 无法给出用户原话证据时，记录降级为 `ai_inferred + candidate`。
+- `system_observed` 只作为中可信背景，默认不能改变关系状态，也不能覆盖或撤回优先级更高的用户明确档案。
 - `candidate` 不参与提示词、主动聊天、情绪或关系状态更新，并在七天后过期；旧数据迁移为 `legacy_import + legacy`，继续可召回但不能再次改变关系。
 - `temporary_context`、`emotional_episode` 和无明确日期的 `plan` 使用不同默认有效期；身份、喜好和重要关系事件不采用统一 TTL。
 - 上下文注入优先使用已校验的用户原话，而不是 AI 撰写的事件摘要。

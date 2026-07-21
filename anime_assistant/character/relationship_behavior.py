@@ -7,6 +7,27 @@ Every prompt/rendering path consumes that same policy so thresholds cannot drift
 from anime_assistant.infrastructure.models import normalize_relationship
 
 
+def _resolve_stage(value, previous, *, low, middle, high):
+    """Resolve a three-level stage with five-point exit hysteresis."""
+    if previous == high:
+        if value >= 65:
+            return high
+        return middle if value >= 35 else low
+    if previous == middle:
+        if value >= 70:
+            return high
+        return low if value < 35 else middle
+    if previous == low:
+        if value >= 70:
+            return high
+        return middle if value >= 40 else low
+    if value >= 70:
+        return high
+    if value >= 40:
+        return middle
+    return low
+
+
 def build_relationship_policy(relationship, emotion=None):
     relationship = normalize_relationship(relationship)
     emotion = emotion if isinstance(emotion, dict) else {}
@@ -15,26 +36,27 @@ def build_relationship_policy(relationship, emotion=None):
     trust = relationship["trust"]
     familiarity = relationship["familiarity"]
 
-    if affection >= 70:
-        closeness = "close"
-    elif affection >= 40:
-        closeness = "friendly"
-    else:
-        closeness = "reserved"
-
-    if trust >= 70:
-        openness = "open"
-    elif trust >= 40:
-        openness = "careful"
-    else:
-        openness = "guarded"
-
-    if familiarity >= 70:
-        familiarity_level = "familiar"
-    elif familiarity >= 40:
-        familiarity_level = "acquainted"
-    else:
-        familiarity_level = "new"
+    closeness = _resolve_stage(
+        affection,
+        relationship.get("closeness_stage"),
+        low="reserved",
+        middle="friendly",
+        high="close",
+    )
+    openness = _resolve_stage(
+        trust,
+        relationship.get("openness_stage"),
+        low="guarded",
+        middle="careful",
+        high="open",
+    )
+    familiarity_level = _resolve_stage(
+        familiarity,
+        relationship.get("familiarity_stage"),
+        low="new",
+        middle="acquainted",
+        high="familiar",
+    )
 
     mood_expression = {
         "happy": 0.8,
@@ -53,6 +75,17 @@ def build_relationship_policy(relationship, emotion=None):
         "verbosity": familiarity / 100.0,
         "emotion_expression": mood_expression,
     }
+
+
+def sync_relationship_stages(relationship):
+    """Persist the semantic stages used as hysteresis history."""
+    if not isinstance(relationship, dict):
+        return relationship
+    policy = build_relationship_policy(relationship)
+    relationship["closeness_stage"] = policy["closeness"]
+    relationship["openness_stage"] = policy["openness"]
+    relationship["familiarity_stage"] = policy["familiarity_level"]
+    return relationship
 
 
 def build_relationship_hint(relationship):
