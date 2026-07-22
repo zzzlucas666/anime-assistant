@@ -5,6 +5,7 @@
 ## 已有功能
 
 - 流式聊天、角色开场白和失败兜底。
+- 统一 `ApplicationRuntime`、后台任务监督器和单调递增 `turn_id`，避免迟到回复、语音或后处理覆盖新一轮交互。
 - Identity、Values、Behavior、Context、Output Rules 五层角色提示架构。
 - 带事实来源、更新历史和冲突覆盖的稳定用户档案。
 - 本地候选规则与同轮 AI 语义校准结合的混合情绪系统，以及精力、好感、信任和熟悉度状态。
@@ -126,6 +127,7 @@ anime_assistant/
 ├─ live2d/          # 模型画布、参数控制与调参工具
 ├─ memory/          # 短期、长期、语义、事件记忆及可信生命周期策略
 ├─ proactive/       # 主动聊天、交互与冷却追踪
+├─ runtime/         # 应用生命周期、任务监督、取消与 turn_id
 ├─ speech/          # TTS 后端适配、翻译、语气策略、队列、WAV 与嘴型处理
 └─ ui/              # Qt 主窗口、后台工作线程与音频播放
 ```
@@ -133,6 +135,12 @@ anime_assistant/
 `main.py` 和 `main_gui.py` 只是轻量兼容入口，分别转交给
 `anime_assistant.console` 和 `anime_assistant.ui.main_window`。本地旧配置中记录的
 TTS worker 路径会在加载时自动迁移到新的包内位置。
+
+GUI 与控制台都通过 `runtime/ApplicationRuntime` 创建和关闭对话、主动聊天、
+语音与记忆服务。每次启动问候、用户输入或主动消息都会取得唯一 `turn_id`；
+新轮次开始后，旧轮次仍可完成必要的事实持久化，但不得再更新当前状态、显示文本
+或播放语音。任务监督器集中记录任务名称、作用域、轮次、运行状态和取消信号，
+应用退出时按统一顺序停止后台服务。
 
 `emotion/manager.py` 与 `speech/service.py` 保留稳定的兼容导入面。情绪的词面
 识别、规划、AI 校准和持久状态转换分别位于 `rules.py`、`planning.py`、

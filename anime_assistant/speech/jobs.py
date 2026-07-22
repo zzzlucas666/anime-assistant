@@ -17,6 +17,7 @@ class SpeechJob:
     fatigue_strength: float = 0.0
     voice_style: Optional[str] = None
     voice_style_strength: float = 0.6
+    turn_id: Optional[str] = None
 
     @classmethod
     def from_legacy(cls, job: Union["SpeechJob", Sequence[object]]) -> "SpeechJob":
@@ -25,8 +26,8 @@ class SpeechJob:
             return job
         if not isinstance(job, (tuple, list)) or len(job) < 2:
             raise TypeError("Speech queue item must be SpeechJob or a legacy tuple")
-        values = list(job[:7])
-        defaults = ["neutral", 1.0, "none", 0.0, None, 0.6]
+        values = list(job[:8])
+        defaults = ["neutral", 1.0, "none", 0.0, None, 0.6, None]
         values.extend(defaults[len(values) - 1 :])
         return cls(
             text=str(values[0]),
@@ -36,6 +37,7 @@ class SpeechJob:
             fatigue_strength=float(values[4]),
             voice_style=None if values[5] is None else str(values[5]),
             voice_style_strength=float(values[6]),
+            turn_id=None if values[7] is None else str(values[7]),
         )
 
 

@@ -15,14 +15,18 @@ class ChatWorker(QThread):
     turn_finished = Signal()
     error_occurred = Signal(str)
 
-    def __init__(self, orchestrator, user_message):
+    def __init__(self, orchestrator, user_message, turn_id=None):
         super().__init__()
         self.orchestrator = orchestrator
         self.user_message = user_message
+        self.turn_id = turn_id
 
     def run(self):
         try:
-            prepared = self.orchestrator.prepare_turn(self.user_message)
+            prepared = self.orchestrator.prepare_turn(
+                self.user_message,
+                turn_id=self.turn_id,
+            )
             raw_reply = ""
             for chunk in self.orchestrator.stream_reply(prepared):
                 raw_reply += chunk
@@ -38,8 +42,9 @@ class ChatWorker(QThread):
 class ProactiveBridge(QObject):
     """Safely relay initiative-engine events to the Qt main thread."""
 
-    message_received = Signal(str)
+    message_received = Signal(str, object)
     state_updated = Signal()
+    turn_started = Signal(object)
 
 
 class SpeechBridge(QObject):

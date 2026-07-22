@@ -427,17 +427,24 @@ def _embedding_backfill_worker(batch_size):
         logger.warning("后台回填事件向量失败，已保留词面检索兜底：%s", exc)
 
 
-def schedule_embedding_backfill(batch_size=8):
+def schedule_embedding_backfill(batch_size=8, task_supervisor=None):
     """Start at most one low-priority backfill worker without blocking startup/chat."""
     global _embedding_backfill_thread
     with _embedding_backfill_lock:
         if _embedding_backfill_thread is not None and _embedding_backfill_thread.is_alive():
             return False
-        _embedding_backfill_thread = threading.Thread(
-            target=_embedding_backfill_worker,
-            args=(batch_size,),
-            name="memory-embedding-backfill",
-            daemon=True,
-        )
-        _embedding_backfill_thread.start()
+        if task_supervisor is not None:
+            _embedding_backfill_thread = task_supervisor.start(
+                "memory-embedding-backfill",
+                lambda _token: _embedding_backfill_worker(batch_size),
+                scope="startup",
+            )
+        else:
+            _embedding_backfill_thread = threading.Thread(
+                target=_embedding_backfill_worker,
+                args=(batch_size,),
+                name="memory-embedding-backfill",
+                daemon=True,
+            )
+            _embedding_backfill_thread.start()
         return True
