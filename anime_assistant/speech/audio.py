@@ -16,6 +16,7 @@ class SpeechAudio:
     mouth_envelope: tuple[float, ...]
     envelope_window_ms: int
     spoken_text: str
+    turn_id: str | None = None
 
 
 def build_mouth_envelope(wav_data, window_ms=33):
@@ -105,9 +106,11 @@ def combine_speech_audio(audio_batch, pause_ms=90):
                 wav_file.writeframesraw(silence)
             wav_file.writeframesraw(frames)
     wav_data = output.getvalue()
+    turn_ids = {getattr(audio, "turn_id", None) for audio in audio_batch}
     return SpeechAudio(
         wav_data=wav_data,
         mouth_envelope=build_mouth_envelope(wav_data),
         envelope_window_ms=33,
         spoken_text="".join(audio.spoken_text for audio in audio_batch),
+        turn_id=turn_ids.pop() if len(turn_ids) == 1 else None,
     )

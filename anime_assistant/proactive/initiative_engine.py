@@ -79,6 +79,8 @@ class InitiativeEngine:
         proactive_min_interval_minutes=None,
         proactive_max_per_day=None,
         on_message=None,
+        turn_coordinator=None,
+        task_supervisor=None,
     ):
         self.config = config
         self.context = context
@@ -96,7 +98,22 @@ class InitiativeEngine:
         # 控制台模式不传，run_loop 会退回直接 print；GUI模式传入一个会
         # emit Qt信号的函数，让消息能安全地从后台线程传回界面主线程。
         self.on_message = on_message
+        self.turn_coordinator = turn_coordinator
+        self.task_supervisor = task_supervisor
+        self.last_turn_id = None
         self._stop_flag = threading.Event()
+
+    def _begin_proactive_turn(self):
+        if self.turn_coordinator is None:
+            return None
+        return self.turn_coordinator.begin("proactive").turn_id
+
+    def _turn_is_current(self, turn_id):
+        return (
+            turn_id is None
+            or self.turn_coordinator is None
+            or self.turn_coordinator.is_current(turn_id)
+        )
 
     # ------------------------------------------------------------------
     # 触发条件判断（纯规则，不调用AI，便宜且可控）
@@ -254,7 +271,25 @@ class InitiativeEngine:
             )
 
         # 慢 AI 请求必须在锁外。
-        message = generate_proactive_message(context_snapshot, reason_hint)
+        turn_id = self._begin_proactive_turn()
+        if self.task_supervisor is not None:
+            with self.task_supervisor.track(
+                "proactive-generation",
+                turn_id=turn_id,
+                scope="proactive",
+            ) as task_token:
+                message = generate_proactive_message(context_snapshot, reason_hint)
+                if not task_token.is_current():
+                    logger.info(
+                        "主动消息生成完成但轮次已过时，已丢弃 turn_id=%s",
+                        turn_id,
+                    )
+                    return None
+        else:
+            message = generate_proactive_message(context_snapshot, reason_hint)
+
+        if not self._turn_is_current(turn_id):
+            return None
         proactive_emotion = plan_proactive_emotion(
             message,
             signals,
@@ -263,7 +298,7 @@ class InitiativeEngine:
         )
 
         with self.lock:
-            if self._stop_flag.is_set():
+            if self._stop_flag.is_set() or not self._turn_is_current(turn_id):
                 return None
 
             # AI 生成期间如果用户已经说话，就不再把这条过时的主动消息
@@ -294,6 +329,7 @@ class InitiativeEngine:
             save_emotion(self.emotion)
             self.context.update(self.emotion, self.profile, self.relationship)
             overflow = self._record_message(message)
+            self.last_turn_id = turn_id
 
         # 溢出历史先持久化到待处理队列，累计到批量阈值再调一次 AI。
         if overflow:
