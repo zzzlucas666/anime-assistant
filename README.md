@@ -121,18 +121,24 @@ anime_assistant/
 ├─ ai/              # AI 客户端、五层 Prompt、主回复与兜底
 ├─ character/       # 人设、资料、关系与行为规则
 ├─ conversation/    # 对话编排、意图、路由与上下文
-├─ emotion/         # 情绪候选、信号协议与状态机
+├─ emotion/         # 词面规则、候选规划、AI 校准、信号协议与状态转换
 ├─ infrastructure/  # 配置、路径、日志、模型校验与 JSON 存储
 ├─ live2d/          # 模型画布、参数控制与调参工具
 ├─ memory/          # 短期、长期、语义、事件记忆及可信生命周期策略
 ├─ proactive/       # 主动聊天、交互与冷却追踪
-├─ speech/          # TTS 后端、文本切分、WAV 与嘴型处理
+├─ speech/          # TTS 后端适配、翻译、语气策略、队列、WAV 与嘴型处理
 └─ ui/              # Qt 主窗口、后台工作线程与音频播放
 ```
 
 `main.py` 和 `main_gui.py` 只是轻量兼容入口，分别转交给
 `anime_assistant.console` 和 `anime_assistant.ui.main_window`。本地旧配置中记录的
 TTS worker 路径会在加载时自动迁移到新的包内位置。
+
+`emotion/manager.py` 与 `speech/service.py` 保留稳定的兼容导入面。情绪的词面
+识别、规划、AI 校准和持久状态转换分别位于 `rules.py`、`planning.py`、
+`calibration.py` 与 `state.py`；语音后端、日语翻译和语气映射分别位于
+`backends.py`、`translator.py` 与 `style.py`，`service.py` 只负责任务队列、
+重试、降级和完整音频交付。
 
 ### Mio 本地语音与 AivisSpeech
 

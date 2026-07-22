@@ -200,7 +200,7 @@ class Day29ArchitectureTests(unittest.TestCase):
                     startup_errors.append(str(exc))
 
             with patch(
-                "anime_assistant.speech.service.subprocess.Popen",
+                "anime_assistant.speech.backends.subprocess.Popen",
                 return_value=process,
             ), patch.object(MioStyleBertClient, "_read_worker_output", reader):
                 startup_thread = threading.Thread(target=start_client, daemon=True)
