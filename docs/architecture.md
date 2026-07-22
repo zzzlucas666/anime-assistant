@@ -22,10 +22,10 @@ main.py / main_gui.py（兼容入口）
 - **入口层**：根目录 `main.py` 与 `main_gui.py` 只做兼容转发，真实入口分别是 `anime_assistant.console` 与 `anime_assistant.ui.main_window`。
 - **界面层**：`ui/main_window.py` 负责窗口状态和交互，`ui/workers.py` 隔离后台对话线程，`ui/playback.py` 负责顺序音频播放。
 - **应用层**：`conversation/orchestrator.py` 编排一轮正常对话；`proactive/initiative_engine.py` 评分并提交主动对话。
-- **角色与情绪层**：`character/` 管理人设、稳定档案和关系；`character/relationship_behavior.py` 是关系行为阈值的唯一来源；`emotion/manager.py` 负责判断与状态转换，`emotion/signals.py` 统一本轮情绪信号协议。
+- **角色与情绪层**：`character/` 管理人设、稳定档案和关系；`character/relationship_behavior.py` 是关系行为阈值的唯一来源；`emotion/rules.py` 保存本地词面规则，`emotion/planning.py` 负责候选与三种对话模式的即时规划，`emotion/calibration.py` 约束 AI 校准，`emotion/state.py` 负责持久状态转换，`emotion/manager.py` 仅保留兼容入口，`emotion/signals.py` 统一本轮情绪信号协议。
 - **AI 适配层**：`ai/client.py` 创建 OpenAI 兼容客户端；`ai/prompts/` 生成五层角色提示；`ai/chat.py` 负责三种对话模式的请求、流式过滤和失败兜底。
 - **记忆层**：`memory/` 管理短期历史、事件、长期摘要和语义检索；`conversation/context_builder.py` 组合这些数据。
-- **语音层**：`speech/service.py` 编排后端与降级策略，`speech/text.py` 处理朗读文本，`speech/audio.py` 处理 WAV 合并和嘴型包络。
+- **语音层**：`speech/service.py` 只编排任务队列、重试和降级策略，`speech/backends.py` 封装 AivisSpeech 与两种 Mio 本地后端，`speech/translator.py` 隔离日语转换，`speech/style.py` 负责情绪到参考风格和语速的映射，`speech/text.py` 处理朗读文本，`speech/audio.py` 处理 WAV 合并和嘴型包络。
 - **Live2D 层**：`live2d/canvas.py` 封装可选 OpenGL 画布，`live2d/controller.py` 管理参数动画与表情过渡。
 - **基础设施**：`infrastructure/` 统一配置、绝对路径、日志、数据模型和原子 JSON 存储。
 
@@ -33,7 +33,7 @@ main.py / main_gui.py（兼容入口）
 
 - 根目录不再放业务模块；新增能力应进入对应的 `anime_assistant` 功能包。
 - UI 不直接实现 AI、TTS 或情绪规则，只负责调用应用服务并通过 Qt 信号更新界面。
-- `service.py` 和 `manager.py` 可以保留兼容外观，但纯文本、纯音频、信号结构和画布适配应放到独立模块。
+- `speech/service.py` 和 `emotion/manager.py` 只保留稳定外观；后端、翻译、语气策略、规则识别、规划、校准和状态转换必须由独立模块承担。
 - 包间引用使用 `anime_assistant.*` 绝对导入，避免依赖当前工作目录。
 - 默认配置中的脚本路径必须指向真实包内文件；旧本地配置由加载层迁移，不要求用户手改。
 - `tests/test_package_layout.py` 保护这些边界，防止重构后悄悄退回根目录堆叠。
