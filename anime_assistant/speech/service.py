@@ -5,8 +5,10 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from contextlib import nullcontext
 
 from anime_assistant.infrastructure.logging import get_logger
+from anime_assistant.runtime.supervisor import TaskSupervisor
 from anime_assistant.speech.audio import (
     SpeechAudio,
     build_mouth_envelope,
@@ -65,14 +67,29 @@ def _is_non_retryable_tts_error(exc):
 _WarmupJob = WarmupJob
 
 
+class _StaleSpeechTurn(RuntimeError):
+    """Internal control flow: synthesis result belongs to an older turn."""
+
+
 class SpeechSynthesisService:
     """单后台线程的语音队列；网络和合成永远不占用 Qt 主线程。"""
 
-    def __init__(self, config, on_audio_ready, on_error=None, on_status=None):
+    def __init__(
+        self,
+        config,
+        on_audio_ready,
+        on_error=None,
+        on_status=None,
+        task_supervisor=None,
+        is_turn_current=None,
+    ):
         self.config = config
         self.on_audio_ready = on_audio_ready
         self.on_error = on_error or (lambda _message: None)
         self.on_status = on_status or (lambda _status: None)
+        self._turn_checker = is_turn_current or (lambda _turn_id: True)
+        self._owns_task_supervisor = task_supervisor is None
+        self.task_supervisor = task_supervisor or TaskSupervisor(self._turn_checker)
         aivis_client = AivisSpeechClient(
             config.get("aivis_endpoint", DEFAULT_AIVIS_ENDPOINT),
             config.get("aivis_timeout_seconds", DEFAULT_AIVIS_TIMEOUT_SECONDS),
@@ -110,8 +127,14 @@ class SpeechSynthesisService:
         self.local_retry_attempts = max(0, min(2, retry_attempts))
         self._jobs = queue.Queue(maxsize=4)
         self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="speech-tts", daemon=True)
-        self._thread.start()
+        self._task_handle = self.task_supervisor.start(
+            "speech-tts",
+            lambda token: self._run(token),
+            scope="speech-worker",
+            cancel=self._signal_stop,
+        )
+        # Compatibility for diagnostics and older tests.
+        self._thread = self._task_handle.thread
 
     def prewarm(self, on_complete=None):
         """把本地模型预热排在第一条语音之前；非本地后端无需预热。"""
@@ -140,6 +163,7 @@ class SpeechSynthesisService:
         fatigue_strength=0.0,
         voice_style=None,
         voice_style_strength=0.6,
+        turn_id=None,
     ):
         if self._stop_event.is_set() or not prepare_spoken_text(text):
             return False
@@ -153,6 +177,7 @@ class SpeechSynthesisService:
                     fatigue_strength=fatigue_strength,
                     voice_style=voice_style,
                     voice_style_strength=voice_style_strength,
+                    turn_id=turn_id,
                 )
             )
             return True
@@ -160,11 +185,10 @@ class SpeechSynthesisService:
             logger.warning("TTS 队列已满，本条语音已跳过")
             return False
 
-    def shutdown(self):
+    def _signal_stop(self):
+        if self._stop_event.is_set():
+            return
         self._stop_event.set()
-        self.on_audio_ready = lambda _audio: None
-        self.on_error = lambda _message: None
-        self.on_status = lambda _status: None
         try:
             self._jobs.put_nowait(None)
         except queue.Full:
@@ -177,10 +201,43 @@ class SpeechSynthesisService:
             close = getattr(client, "close", None)
             if callable(close):
                 close()
-        self._thread.join(timeout=2.0)
 
-    def _run(self):
-        while not self._stop_event.is_set():
+    def shutdown(self):
+        self.on_audio_ready = lambda _audio: None
+        self.on_error = lambda _message: None
+        self.on_status = lambda _status: None
+        self._signal_stop()
+        task_handle = getattr(self, "_task_handle", None)
+        if task_handle is not None:
+            task_handle.cancel()
+            task_handle.join(timeout=2.0)
+        else:
+            thread = getattr(self, "_thread", None)
+            if thread is not None:
+                thread.join(timeout=2.0)
+        if getattr(self, "_owns_task_supervisor", False):
+            self.task_supervisor.shutdown(timeout=2.0)
+
+    def _is_turn_current(self, turn_id):
+        if turn_id is None:
+            return True
+        checker = getattr(self, "_turn_checker", None)
+        return True if not callable(checker) else bool(checker(turn_id))
+
+    def _track_speech_task(self, turn_id):
+        supervisor = getattr(self, "task_supervisor", None)
+        if supervisor is None:
+            return nullcontext(None)
+        return supervisor.track(
+            "speech-synthesis",
+            turn_id=turn_id,
+            scope="speech",
+        )
+
+    def _run(self, task_token=None):
+        while not self._stop_event.is_set() and (
+            task_token is None or not task_token.cancelled
+        ):
             job = self._jobs.get()
             if job is None:
                 return
@@ -188,6 +245,10 @@ class SpeechSynthesisService:
                 self._run_warmup(job)
                 continue
             speech_job = SpeechJob.from_legacy(job)
+            turn_id = speech_job.turn_id
+            if not self._is_turn_current(turn_id):
+                logger.info("已跳过过时语音任务 turn_id=%s", turn_id)
+                continue
             text = speech_job.text
             mood = speech_job.mood
             emotion_strength = speech_job.emotion_strength
@@ -240,20 +301,29 @@ class SpeechSynthesisService:
                             raise AivisSpeechError(
                                 detail or f"TTS backend is unavailable at {client.endpoint}"
                             )
-                        audio_batch = self._synthesize_sentences_with_recovery(
-                            client,
-                            sentences,
-                            speaker_id,
-                            mood,
-                            voice_style=voice_style,
-                            speed_multiplier=speed_multiplier,
-                        )
+                        with self._track_speech_task(turn_id) as speech_token:
+                            audio_batch = self._synthesize_sentences_with_recovery(
+                                client,
+                                sentences,
+                                speaker_id,
+                                mood,
+                                voice_style=voice_style,
+                                speed_multiplier=speed_multiplier,
+                                turn_id=turn_id,
+                            )
+                            if (
+                                speech_token is not None
+                                and not speech_token.is_current()
+                            ):
+                                raise _StaleSpeechTurn(turn_id)
                         if client_index:
                             logger.warning(
                                 "Mio 本地语音不可用，本条回复已完整回退到 AivisSpeech"
                             )
                         break
                     except Exception as exc:
+                        if isinstance(exc, _StaleSpeechTurn):
+                            raise
                         last_error = exc
                         audio_batch = None
                         backend_failures.append(
@@ -279,10 +349,19 @@ class SpeechSynthesisService:
                     raise last_error or AivisSpeechError("No TTS backend is available")
 
                 combined_audio = combine_speech_audio(audio_batch)
-                if combined_audio is not None and not self._stop_event.is_set():
+                if (
+                    combined_audio is not None
+                    and not self._stop_event.is_set()
+                    and self._is_turn_current(turn_id)
+                ):
                     self._notify_status("ready")
                     self.on_audio_ready(combined_audio)
+                elif combined_audio is not None:
+                    logger.info("语音合成完成但轮次已过时，已丢弃 turn_id=%s", turn_id)
             except Exception as exc:
+                if isinstance(exc, _StaleSpeechTurn):
+                    logger.info("语音轮次已过时，已静默丢弃 turn_id=%s", turn_id)
+                    continue
                 logger.warning("TTS 生成失败，已降级为文字回复：%s", exc)
                 self._notify_status("error")
                 self.on_error(str(exc))
@@ -319,12 +398,15 @@ class SpeechSynthesisService:
         mood="neutral",
         voice_style="conversational",
         speed_multiplier=1.0,
+        turn_id=None,
     ):
         """完整合成所有片段；任一失败时由调用方整条回退或取消。"""
         audio_batch = []
         for sentence in sentences:
             if self._stop_event.is_set():
                 raise AivisSpeechError("TTS service is shutting down")
+            if not self._is_turn_current(turn_id):
+                raise _StaleSpeechTurn(turn_id)
             synthesis_args = (
                 sentence,
                 speaker_id,
@@ -347,6 +429,7 @@ class SpeechSynthesisService:
                     mouth_envelope=build_mouth_envelope(wav_data),
                     envelope_window_ms=33,
                     spoken_text=sentence,
+                    turn_id=turn_id,
                 )
             )
         return audio_batch
@@ -359,6 +442,7 @@ class SpeechSynthesisService:
         mood="neutral",
         voice_style="conversational",
         speed_multiplier=1.0,
+        turn_id=None,
     ):
         """本地常驻进程偶发失步时，重启后重新合成完整回复。"""
         backend_name = getattr(client, "backend_name", "")
@@ -378,8 +462,11 @@ class SpeechSynthesisService:
                     mood,
                     voice_style=voice_style,
                     speed_multiplier=speed_multiplier,
+                    turn_id=turn_id,
                 )
             except Exception as exc:
+                if isinstance(exc, _StaleSpeechTurn):
+                    raise
                 if _is_non_retryable_tts_error(exc):
                     raise
                 if attempt >= retry_attempts or self._stop_event.is_set():
