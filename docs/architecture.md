@@ -21,7 +21,8 @@ main.py / main_gui.py（兼容入口）
 
 - **入口层**：根目录 `main.py` 与 `main_gui.py` 只做兼容转发，真实入口分别是 `anime_assistant.console` 与 `anime_assistant.ui.main_window`。
 - **界面层**：`ui/main_window.py` 负责窗口状态和交互，`ui/workers.py` 隔离后台对话线程，`ui/playback.py` 负责顺序音频播放。
-- **应用层**：`conversation/orchestrator.py` 编排一轮正常对话；`proactive/initiative_engine.py` 评分并提交主动对话。
+- **运行时层**：`runtime/application.py` 统一创建、启动和关闭应用服务，`runtime/turns.py` 分配当前轮次身份，`runtime/supervisor.py` 记录并协作取消后台任务。
+- **应用层**：`conversation/orchestrator.py` 编排一轮正常对话；`proactive/initiative_engine.py` 评分并提交主动对话。两者不再拥有整个进程的生命周期。
 - **角色与情绪层**：`character/` 管理人设、稳定档案和关系；`character/relationship_behavior.py` 是关系行为阈值的唯一来源；`emotion/rules.py` 保存本地词面规则，`emotion/planning.py` 负责候选与三种对话模式的即时规划，`emotion/calibration.py` 约束 AI 校准，`emotion/state.py` 负责持久状态转换，`emotion/manager.py` 仅保留兼容入口，`emotion/signals.py` 统一本轮情绪信号协议。
 - **AI 适配层**：`ai/client.py` 创建 OpenAI 兼容客户端；`ai/prompts/` 生成五层角色提示；`ai/chat.py` 负责三种对话模式的请求、流式过滤和失败兜底。
 - **记忆层**：`memory/` 管理短期历史、事件、长期摘要和语义检索；`conversation/context_builder.py` 组合这些数据。
@@ -39,6 +40,11 @@ main.py / main_gui.py（兼容入口）
 - `tests/test_package_layout.py` 保护这些边界，防止重构后悄悄退回根目录堆叠。
 
 ## 正常对话时序
+
+每次启动问候、用户输入和主动消息先由 `TurnCoordinator` 生成形如
+`turn-00000001-user` 的单调递增 `turn_id`。新轮次成为当前轮次时，监督器会向旧的
+对话流、后处理、主动生成和语音任务发出协作取消；不能立即中断的网络或本地模型
+推理允许自然返回，但返回值必须再次校验 `turn_id`。
 
 1. `prepare_turn()` 在本地生成带置信度的情绪候选并选出安全基线，同时识别意图，必要时提取用户资料。
 2. 在共享锁内写入用户消息，并取历史与上下文快照。
@@ -104,6 +110,11 @@ main.py / main_gui.py（兼容入口）
 
 ## 并发不变式
 
+- GUI 与控制台必须共享 `ApplicationRuntime` 的服务创建、启动和关闭顺序，不得各自复制线程生命周期代码。
+- 面向用户的异步结果必须携带 `turn_id`，且只能由当前轮次更新界面、实时情绪、关系或语音播放。
+- 旧轮次长期事件可以在事实来源校验后落盘，但不得在迟到时覆盖当前档案、情绪、关系和 context。
+- TTS 不为切换轮次强杀常驻模型；当前推理可自然结束，但旧 `turn_id` 的完整音频必须静默丢弃且不能误报为后端故障。
+- 所有非 Qt 后台线程应登记到 `TaskSupervisor`，并提供任务名、作用域、可选轮次与协作取消信号。
 - Orchestrator 和 InitiativeEngine 必须共享同一个历史列表与同一把状态锁。
 - `save_memory()` 必须原地截断列表，不得让多个持有者分叉。
 - 网络 AI 请求和长期摘要不得持有全局状态锁。

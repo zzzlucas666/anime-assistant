@@ -37,9 +37,7 @@ GUI 入口 —— PySide6 实现的"终端风格"聊天窗口（深色背景、�
 
 import sys
 import html
-import threading
 import datetime
-import copy
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QTextCursor, QKeyEvent, QSurfaceFormat
@@ -48,7 +46,6 @@ from PySide6.QtWidgets import (
     QTextEdit, QLineEdit, QPushButton, QLabel
 )
 
-from anime_assistant.conversation.context_manager import ContextManager
 from anime_assistant.infrastructure.config import (
     load_config,
     save_live2d_parameter_preset,
@@ -56,26 +53,12 @@ from anime_assistant.infrastructure.config import (
     save_live2d_waiting_motion_intensity,
     save_live2d_waiting_motion_speed,
 )
-from anime_assistant.ai.chat import generate_greeting
-from anime_assistant.memory.memory_manager import load_memory
-from anime_assistant.emotion.manager import (
-    load_emotion,
-    plan_greeting_emotion,
-    save_emotion,
-    update_emotion,
-)
-from anime_assistant.character.profile_manager import load_profile
-from anime_assistant.character.relationship_manager import load_relationship
-from anime_assistant.conversation.orchestrator import ConversationOrchestrator
-from anime_assistant.proactive.initiative_engine import InitiativeEngine
 from anime_assistant.infrastructure.logging import get_logger
 from anime_assistant.live2d.controller import CharacterController
 from anime_assistant.live2d.canvas import LIVE2D_AVAILABLE, Live2DWidget, live2d
 from anime_assistant.live2d.model_utils import load_live2d_model_metadata, resolve_live2d_model_path
 from anime_assistant.live2d.parameter_tuner import Live2DParameterTuner
-from anime_assistant.memory.semantic_memory import warmup_model_async
-from anime_assistant.memory.event_manager import schedule_embedding_backfill
-from anime_assistant.speech.service import SpeechSynthesisService
+from anime_assistant.runtime.application import ApplicationRuntime
 from anime_assistant.ui.playback import SpeechPlaybackController
 from anime_assistant.ui.workers import ChatWorker, ProactiveBridge, SpeechBridge
 
@@ -209,42 +192,35 @@ class MainWindow(QMainWindow):
         self.config = config or load_config()
         self.live2d_model_path = resolve_live2d_model_path(self.config.get("live2d_model_path"))
         self.live2d_metadata = load_live2d_model_metadata(self.live2d_model_path)
-        conversation_history = load_memory()
-        emotion = load_emotion()
-        profile = load_profile()
-        relationship = load_relationship()
-        self.context = ContextManager(self.config, emotion, profile, relationship)
-
-        # emotion / relationship 这两个字典会被 update_emotion / update_relationship
-        # 原地修改（不是重新赋值新对象），所以这里保留的引用会一直反映最新状态，
-        # 状态栏直接读这两个引用就行，不需要额外的同步机制。
-        self.emotion = emotion
-        self.relationship = relationship
-
-        self.state_lock = threading.Lock()
-
         self.proactive_bridge = ProactiveBridge()
         self.proactive_bridge.message_received.connect(self._on_proactive_message)
         self.proactive_bridge.state_updated.connect(self._update_status_bar)
+        self.proactive_bridge.turn_started.connect(self._on_runtime_turn_started)
+        self.speech_bridge = SpeechBridge(self)
+        self.speech_bridge.audio_ready.connect(self._on_speech_audio_ready)
+        self.speech_bridge.error_occurred.connect(self._on_speech_error)
+        self.speech_bridge.status_changed.connect(self._on_speech_status)
+        self.tts_enabled = bool(self.config.get("tts_enabled", False))
 
-        self.orchestrator = ConversationOrchestrator(
-            self.config, self.context, conversation_history, emotion, profile, relationship,
-            lock=self.state_lock,
+        self.runtime = ApplicationRuntime(
+            self.config,
+            enable_speech=self.tts_enabled,
+            on_proactive_message=self.proactive_bridge.message_received.emit,
             on_state_updated=self.proactive_bridge.state_updated.emit,
+            on_audio_ready=self.speech_bridge.audio_ready.emit,
+            on_speech_error=self.speech_bridge.error_occurred.emit,
+            on_speech_status=self.speech_bridge.status_changed.emit,
+            on_turn_started=self.proactive_bridge.turn_started.emit,
         )
-
-        self.initiative_engine = InitiativeEngine(
-            self.config, self.context, conversation_history, emotion, profile, relationship,
-            lock=self.state_lock,
-            check_interval_minutes=self.config["proactive_check_interval_minutes"],
-            idle_threshold_minutes=self.config["proactive_idle_threshold_minutes"],
-            proactive_min_interval_minutes=self.config["proactive_min_interval_minutes"],
-            proactive_max_per_day=self.config["proactive_max_per_day"],
-            # 关键：传入一个会 emit 信号的回调，而不是让它直接 print。
-            # GUI模式下不再需要 prompt_toolkit 的 patch_stdout 技巧，
-            # 因为信号/槽机制天生就不会跟用户输入冲突。
-            on_message=self.proactive_bridge.message_received.emit
-        )
+        # UI 只保留只读/兼容别名；服务的创建、线程和关闭统一由 Runtime 负责。
+        self.context = self.runtime.context
+        self.emotion = self.runtime.emotion
+        self.relationship = self.runtime.relationship
+        self.state_lock = self.runtime.state_lock
+        self.orchestrator = self.runtime.orchestrator
+        self.initiative_engine = self.runtime.initiative_engine
+        self.speech_service = self.runtime.speech_service
+        self._active_turn_id = None
 
         self._worker = None  # 当前正在跑的 ChatWorker，发送下一条前要确认它已结束
         self._is_closing = False
@@ -294,35 +270,11 @@ class MainWindow(QMainWindow):
         )
         if self.live2d_widget is not None:
             self.live2d_widget.set_character_controller(self.character_controller)
-        self.tts_enabled = bool(self.config.get("tts_enabled", False))
-        self.speech_bridge = SpeechBridge(self)
-        self.speech_bridge.audio_ready.connect(self._on_speech_audio_ready)
-        self.speech_bridge.error_occurred.connect(self._on_speech_error)
-        self.speech_bridge.status_changed.connect(self._on_speech_status)
         self.speech_playback = SpeechPlaybackController(
             self.character_controller, self
         )
-        self.speech_service = None
-        if self.tts_enabled:
-            self.speech_service = SpeechSynthesisService(
-                self.config,
-                on_audio_ready=self.speech_bridge.audio_ready.emit,
-                on_error=self.speech_bridge.error_occurred.emit,
-                on_status=self.speech_bridge.status_changed.emit,
-            )
-        def warmup_memory_services():
-            warmup_model_async()
-            schedule_embedding_backfill()
-
-        prewarm_started = False
-        if self.speech_service is not None:
-            prewarm_started = self.speech_service.prewarm(
-                on_complete=warmup_memory_services
-            )
-        if not prewarm_started:
-            warmup_memory_services()
         self._start_timers()
-        self._start_background_thread()
+        self.runtime.start()
         self._show_greeting()
 
     # ------------------------------------------------------------------
@@ -612,34 +564,16 @@ class MainWindow(QMainWindow):
             )
 
     def _show_greeting(self):
-        with self.state_lock:
-            emotion_snapshot = copy.deepcopy(self.emotion)
-            relationship_snapshot = copy.deepcopy(self.relationship)
-            context_snapshot = copy.deepcopy(self.context.get_context())
-        context_snapshot["turn_emotion"] = plan_greeting_emotion(
-            "",
-            emotion_snapshot,
-            relationship_snapshot,
-        )
-        greeting = generate_greeting(context_snapshot)
-        greeting_emotion = plan_greeting_emotion(
-            greeting,
-            emotion_snapshot,
-            relationship_snapshot,
-        )
-        with self.state_lock:
-            self.emotion = update_emotion(
-                self.emotion,
-                interaction=greeting_emotion,
-                consume_energy=False,
-            )
-            save_emotion(self.emotion)
-            self.context.update(self.emotion, self.context.profile, self.relationship)
+        runtime_message = self.runtime.create_greeting()
+        if runtime_message is None:
+            return
+        greeting = runtime_message.text
+        self._active_turn_id = runtime_message.turn_id
         self.messages.append(self._new_message("system", f"{self.config.get('assistant_name', 'Mio')} 已启动"))
         self.messages.append(self._new_message("mio", greeting))
         self._update_status_bar()
         self._render()
-        self._speak_reply(greeting)
+        self._speak_reply(greeting, runtime_message.turn_id)
 
     # ------------------------------------------------------------------
     # 发送消息 / 接收流式回复
@@ -668,13 +602,21 @@ class MainWindow(QMainWindow):
         self.input_line.setEnabled(False)
         self.send_button.setEnabled(False)
 
-        self._worker = ChatWorker(self.orchestrator, text)
+        self._active_turn_id = self.runtime.begin_turn("user")
+        self._worker = ChatWorker(
+            self.orchestrator,
+            text,
+            turn_id=self._active_turn_id,
+        )
         self._worker.chunk_received.connect(self._on_chunk_received)
         self._worker.error_occurred.connect(self._on_worker_error)
         self._worker.turn_finished.connect(self._on_turn_finished)
         self._worker.start()
 
     def _on_chunk_received(self, chunk):
+        worker_turn_id = getattr(self._worker, "turn_id", None)
+        if not self.runtime.is_turn_current(worker_turn_id):
+            return
         if self.is_typing:
             # 第一个字到了，"正在输入"提示退场，切换成真正的流式气泡
             self.is_typing = False
@@ -690,6 +632,18 @@ class MainWindow(QMainWindow):
         self._schedule_stream_render()
 
     def _on_turn_finished(self):
+        worker_turn_id = getattr(self._worker, "turn_id", None)
+        if not self.runtime.is_turn_current(worker_turn_id):
+            logger.info("GUI 已忽略过时轮次收尾 turn_id=%s", worker_turn_id)
+            self.is_streaming = False
+            self.is_typing = False
+            self.streaming_buffer = ""
+            self._render()
+            if not self._is_closing:
+                self.input_line.setEnabled(True)
+                self.send_button.setEnabled(True)
+                self.input_line.setFocus()
+            return
         self._flush_stream_render()
         # 把流式过程中的临时气泡固化成正式的一条消息
         reply_text = self.streaming_buffer
@@ -700,7 +654,7 @@ class MainWindow(QMainWindow):
         self.is_typing = False
         self.streaming_buffer = ""
         if self.tts_enabled:
-            self._speak_reply(reply_text)
+            self._speak_reply(reply_text, worker_turn_id)
         else:
             self.character_controller.on_reply_finished()
 
@@ -716,6 +670,9 @@ class MainWindow(QMainWindow):
             self.input_line.setFocus()
 
     def _on_worker_error(self, error_text):
+        worker_turn_id = getattr(self._worker, "turn_id", None)
+        if not self.runtime.is_turn_current(worker_turn_id):
+            return
         logger.error("聊天处理失败：%s", error_text)
         self.is_streaming = False
         self.is_typing = False
@@ -725,38 +682,44 @@ class MainWindow(QMainWindow):
         self.messages.append(self._new_message("system", "（出了点问题，请稍后再试）"))
         self._render()
 
-    def _on_proactive_message(self, message):
+    def _on_proactive_message(self, message, turn_id=None):
         """
         InitiativeEngine 通过信号传来的主动消息，运行在GUI主线程，
         可以安全地直接操作界面控件。
         """
+        if not self.runtime.is_turn_current(turn_id):
+            return
+        self._active_turn_id = turn_id
         self.messages.append(self._new_message("system", "Mio 突然找你说话"))
         self.messages.append(self._new_message("mio", message))
         self._render()
         self._update_status_bar()
-        self._speak_reply(message)
+        self._speak_reply(message, turn_id)
+
+    def _on_runtime_turn_started(self, turn_context):
+        """Stop already queued/playing audio before presenting a newer turn."""
+        self._active_turn_id = getattr(turn_context, "turn_id", None)
+        if hasattr(self, "speech_playback"):
+            self.speech_playback.stop()
 
     # ------------------------------------------------------------------
     # 本地 Mio / AivisSpeech 合成与播放
     # ------------------------------------------------------------------
 
-    def _speak_reply(self, text):
+    def _speak_reply(self, text, turn_id=None):
         if not self.tts_enabled or self.speech_service is None or not text:
             return
-        mood = self.emotion.get("mood", "neutral")
-        if self.speech_service.speak(
-            text,
-            mood,
-            emotion_strength=self.emotion.get("mood_strength", 1.0),
-            modifier=self.emotion.get("modifier", "none"),
-            fatigue_strength=self.emotion.get("fatigue_strength", 0.0),
-            voice_style=self.emotion.get("voice_style", "conversational"),
-            voice_style_strength=self.emotion.get("voice_style_strength", 0.4),
-        ):
+        if self.runtime.speak(text, turn_id=turn_id):
             self.character_controller.on_speech_preparing()
 
     def _on_speech_audio_ready(self, audio):
         if self._is_closing:
+            return
+        if not self.runtime.is_turn_current(getattr(audio, "turn_id", None)):
+            logger.info(
+                "GUI 已忽略过时语音 turn_id=%s",
+                getattr(audio, "turn_id", None),
+            )
             return
         self.speech_playback.enqueue(audio)
 
@@ -816,12 +779,6 @@ class MainWindow(QMainWindow):
     # 后台线程 + 关闭收尾
     # ------------------------------------------------------------------
 
-    def _start_background_thread(self):
-        self._background_thread = threading.Thread(
-            target=self.initiative_engine.run_loop, daemon=True
-        )
-        self._background_thread.start()
-
     def _finish_close_after_worker(self):
         """ChatWorker 自然结束后重新发起关闭，此时可以安全销毁 QThread。"""
         self.close()
@@ -846,18 +803,13 @@ class MainWindow(QMainWindow):
         self.cursor_timer.stop()
         self.typing_timer.stop()
         self.stream_render_timer.stop()
-        if self.speech_service is not None:
-            self.speech_service.shutdown()
         self.character_controller.on_speech_preparing_finished()
         self.speech_playback.stop()
         if self.live2d_widget is not None and hasattr(self.live2d_widget, "_frame_timer"):
             self.live2d_widget._frame_timer.stop()
 
-        if hasattr(self, "_background_thread"):
-            self._background_thread.join(timeout=2)
-
-        # 必须先确认 ChatWorker 已结束，再关闭 Orchestrator 的内部线程池。
-        self.orchestrator.shutdown()
+        # 必须先确认 ChatWorker 已结束，再由 Runtime 按依赖顺序关闭全部后台服务。
+        self.runtime.shutdown()
 
         if LIVE2D_AVAILABLE and not self._live2d_disposed:
             try:

@@ -57,7 +57,7 @@ def _load_model_worker():
         _model_ready.set()
 
 
-def warmup_model_async():
+def warmup_model_async(task_supervisor=None):
     """在 daemon 线程中预热语义模型，返回 True 表示本次启动了加载。"""
     global _model_state, _warmup_thread
     with _model_lock:
@@ -65,12 +65,19 @@ def warmup_model_async():
             return False
         _model_state = "loading"
         _model_ready.clear()
-        _warmup_thread = threading.Thread(
-            target=_load_model_worker,
-            name="semantic-model-warmup",
-            daemon=True,
-        )
-        _warmup_thread.start()
+        if task_supervisor is not None:
+            _warmup_thread = task_supervisor.start(
+                "semantic-model-warmup",
+                lambda _token: _load_model_worker(),
+                scope="startup",
+            )
+        else:
+            _warmup_thread = threading.Thread(
+                target=_load_model_worker,
+                name="semantic-model-warmup",
+                daemon=True,
+            )
+            _warmup_thread.start()
     return True
 
 

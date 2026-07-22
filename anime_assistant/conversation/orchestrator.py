@@ -39,6 +39,8 @@ from anime_assistant.proactive.interaction_tracker import update_last_interactio
 from anime_assistant.memory.long_term_memory import queue_summary_messages, summarize_pending_if_ready
 from anime_assistant.infrastructure.logging import get_logger
 from anime_assistant.memory.policy import can_event_affect_state
+from anime_assistant.runtime.supervisor import TaskSupervisor
+from anime_assistant.runtime.turns import TurnCoordinator
 
 
 logger = get_logger(__name__)
@@ -61,6 +63,8 @@ class ConversationOrchestrator:
         relationship,
         lock=None,
         on_state_updated=None,
+        turn_coordinator=None,
+        task_supervisor=None,
     ):
         self.config = config
         self.context = context
@@ -72,18 +76,24 @@ class ConversationOrchestrator:
         # 如果没传进来（比如单独测试这个类），就自己建一把，保证不报错。
         self.lock = lock if lock is not None else threading.Lock()
         self.on_state_updated = on_state_updated
+        self.turn_coordinator = turn_coordinator or TurnCoordinator()
+        self._owns_task_supervisor = task_supervisor is None
+        self.task_supervisor = task_supervisor or TaskSupervisor(
+            self.turn_coordinator.is_current
+        )
         # 累积本轮（用户消息+助手消息）产生的溢出消息，finalize_turn 结束时统一交给长期摘要
         self._pending_overflow = []
         # 事件提取、情绪/关系更新和长期摘要按对话顺序在单一 daemon
         # 线程中处理。这保留了状态顺序，又不阻塞 GUI 恢复输入。
         self._postprocess_queue = queue.Queue()
         self._postprocess_accepting = True
-        self._postprocess_thread = threading.Thread(
-            target=self._postprocess_loop,
-            name="conversation-postprocess",
-            daemon=True,
+        self._postprocess_task = self.task_supervisor.start(
+            "conversation-postprocess",
+            lambda token: self._postprocess_loop(token),
+            scope="conversation-postprocess-worker",
         )
-        self._postprocess_thread.start()
+        # Compatibility for diagnostics and older tests.
+        self._postprocess_thread = self._postprocess_task.thread
 
     @staticmethod
     def _clean_input(user_message):
@@ -122,7 +132,7 @@ class ConversationOrchestrator:
             save_profile(self.profile)
         return changed
 
-    def prepare_turn(self, user_message):
+    def prepare_turn(self, user_message, turn_id=None):
         """
         处理输入清洗和纯本地路由，并判断本轮要不要走 router 精确回复。
 
@@ -131,6 +141,8 @@ class ConversationOrchestrator:
         返回一个 dict，供 stream_reply / finalize_turn 使用。
         """
         started_at = time.perf_counter()
+        if turn_id is None:
+            turn_id = self.turn_coordinator.begin("user").turn_id
         clean_message = self._clean_input(user_message)
         route = plan_local_route(user_message)
         with self.lock:
@@ -197,6 +209,7 @@ class ConversationOrchestrator:
             )
 
         prepared = {
+            "turn_id": turn_id,
             "clean_message": clean_message,
             "emotion_message": emotion_message,
             "intent": intent,
@@ -212,11 +225,12 @@ class ConversationOrchestrator:
         }
         logger.info(
             "[PERF] prepare_turn intent=%s route_source=%s route_reason=%s "
-            "profile_strategy=%s preflight_ai=0 duration=%.3fs",
+            "profile_strategy=%s turn_id=%s preflight_ai=0 duration=%.3fs",
             intent,
             route.source,
             route.reason,
             route.profile_strategy,
+            turn_id,
             time.perf_counter() - started_at,
         )
         return prepared
@@ -229,34 +243,50 @@ class ConversationOrchestrator:
         started_at = time.perf_counter()
         first_chunk_at = None
         router_reply = prepared["router_reply"]
+        turn_id = prepared.get("turn_id")
 
-        if router_reply:
-            logger.info("[PERF] stream_reply source=router ttft=0.000s total=0.000s")
-            yield router_reply
-            return
+        with self.task_supervisor.track(
+            "conversation-stream",
+            turn_id=turn_id,
+            scope="conversation",
+        ) as task_token:
+            if router_reply:
+                logger.info(
+                    "[PERF] stream_reply source=router turn_id=%s ttft=0.000s total=0.000s",
+                    turn_id,
+                )
+                if task_token.is_current():
+                    yield router_reply
+                return
 
-        def capture_emotion_control(control):
-            prepared["ai_emotion_control"] = copy.deepcopy(control)
+            def capture_emotion_control(control):
+                if task_token.is_current():
+                    prepared["ai_emotion_control"] = copy.deepcopy(control)
 
-        try:
-            for chunk in chat_with_ai_stream(
-                prepared["conversation_snapshot"],
-                prepared["context_snapshot"],
-                on_emotion_control=capture_emotion_control,
-            ):
-                if first_chunk_at is None:
-                    first_chunk_at = time.perf_counter()
-                    logger.info(
-                        "[PERF] stream_reply first_chunk ttft=%.3fs",
-                        first_chunk_at - started_at,
-                    )
-                yield chunk
-        finally:
-            logger.info(
-                "[PERF] stream_reply complete total=%.3fs had_chunk=%s",
-                time.perf_counter() - started_at,
-                first_chunk_at is not None,
-            )
+            try:
+                for chunk in chat_with_ai_stream(
+                    prepared["conversation_snapshot"],
+                    prepared["context_snapshot"],
+                    on_emotion_control=capture_emotion_control,
+                ):
+                    if not task_token.is_current():
+                        logger.info("已停止过时回复流 turn_id=%s", turn_id)
+                        break
+                    if first_chunk_at is None:
+                        first_chunk_at = time.perf_counter()
+                        logger.info(
+                            "[PERF] stream_reply first_chunk turn_id=%s ttft=%.3fs",
+                            turn_id,
+                            first_chunk_at - started_at,
+                        )
+                    yield chunk
+            finally:
+                logger.info(
+                    "[PERF] stream_reply complete turn_id=%s total=%.3fs had_chunk=%s",
+                    turn_id,
+                    time.perf_counter() - started_at,
+                    first_chunk_at is not None,
+                )
 
     def finalize_turn(self, prepared, raw_reply):
         """
@@ -268,8 +298,12 @@ class ConversationOrchestrator:
         started_at = time.perf_counter()
         router_reply = prepared["router_reply"]
         clean_message = prepared["clean_message"]
+        turn_id = prepared.get("turn_id")
 
         reply = router_reply if router_reply else (clean_reply(raw_reply) if raw_reply else "")
+        if not self.turn_coordinator.is_current(turn_id):
+            logger.info("已丢弃过时对话收尾 turn_id=%s", turn_id)
+            return reply
         transient_fallback = is_transient_fallback(reply)
 
         # 即时情绪不再等待“长期事件提取”。这一步只做本地轻量判断，
@@ -337,6 +371,7 @@ class ConversationOrchestrator:
 
         if self._postprocess_accepting and not transient_fallback:
             self._postprocess_queue.put({
+                "turn_id": turn_id,
                 "clean_message": clean_message,
                 "reply": reply,
                 "router_reply": router_reply,
@@ -346,7 +381,8 @@ class ConversationOrchestrator:
             })
 
         logger.info(
-            "[PERF] finalize_turn fast_commit duration=%.4fs queued_postprocess=%s transient_fallback=%s",
+            "[PERF] finalize_turn turn_id=%s fast_commit duration=%.4fs queued_postprocess=%s transient_fallback=%s",
+            turn_id,
             time.perf_counter() - started_at,
             self._postprocess_accepting and not transient_fallback,
             transient_fallback,
@@ -354,8 +390,8 @@ class ConversationOrchestrator:
 
         return reply
 
-    def _postprocess_loop(self):
-        while True:
+    def _postprocess_loop(self, task_token=None):
+        while task_token is None or not task_token.cancelled:
             task = self._postprocess_queue.get()
             try:
                 if task is None:
@@ -368,85 +404,105 @@ class ConversationOrchestrator:
 
     def _postprocess_turn(self, task):
         started_at = time.perf_counter()
-        router_reply = task["router_reply"]
-        profile_info = None
-        profile_duration = 0.0
-        if task.get("profile_strategy") == "deferred_ai":
-            profile_started_at = time.perf_counter()
-            profile_info = extract_profile_info(
-                self.config['api_key'],
-                self.config['model'],
-                task["clean_message"],
-                self.config.get("base_url"),
-            )
-            profile_duration = time.perf_counter() - profile_started_at
-
-        event = None
-        event_duration = 0.0
-        if not router_reply:
-            event_started_at = time.perf_counter()
-            event = extract_event(
-                self.config['api_key'],
-                self.config['model'],
-                task["clean_message"],
-                task["reply"],
-                self.config.get("base_url"),
-            )
-            event_duration = time.perf_counter() - event_started_at
-
-        state_changed = False
-        event_can_mutate_state = can_event_affect_state(event)
-        with self.lock:
-            if profile_info is not None:
-                profile_changed = self._apply_profile_update(
-                    profile_info,
-                    0.8,
+        turn_id = task.get("turn_id")
+        with self.task_supervisor.track(
+            "conversation-postprocess-item",
+            turn_id=turn_id,
+            scope="postprocess",
+        ) as task_token:
+            router_reply = task["router_reply"]
+            profile_info = None
+            profile_duration = 0.0
+            if task.get("profile_strategy") == "deferred_ai":
+                profile_started_at = time.perf_counter()
+                profile_info = extract_profile_info(
+                    self.config['api_key'],
+                    self.config['model'],
                     task["clean_message"],
+                    self.config.get("base_url"),
                 )
-                state_changed = state_changed or profile_changed
+                profile_duration = time.perf_counter() - profile_started_at
 
-            # 即时信号已在 finalize_turn 应用时，不再让稍后返回的长期事件
-            # 标签覆盖它，也避免同一轮重复消耗精力。
-            if not task.get("immediate_emotion_applied", False) and event_can_mutate_state:
-                self.emotion = update_emotion(self.emotion, event)
-                save_emotion(self.emotion)
-                state_changed = True
-
+            event = None
+            event_duration = 0.0
             if not router_reply:
-                save_event(event)
-                if event_can_mutate_state:
-                    relationship_before = copy.deepcopy(self.relationship)
-                    self.relationship = update_relationship(self.relationship, event)
-                    save_relationship(self.relationship)
-                    state_changed = state_changed or self.relationship != relationship_before
+                event_started_at = time.perf_counter()
+                event = extract_event(
+                    self.config['api_key'],
+                    self.config['model'],
+                    task["clean_message"],
+                    task["reply"],
+                    self.config.get("base_url"),
+                )
+                event_duration = time.perf_counter() - event_started_at
 
-            self.context.update(self.emotion, self.profile, self.relationship)
+            # 旧轮次仍可保存事实记忆，但不能晚到后覆盖当前轮次的档案、
+            # 情绪或关系状态。
+            may_mutate_live_state = task_token.is_current()
+            state_changed = False
+            event_can_mutate_state = can_event_affect_state(event)
+            with self.lock:
+                if may_mutate_live_state and profile_info is not None:
+                    profile_changed = self._apply_profile_update(
+                        profile_info,
+                        0.8,
+                        task["clean_message"],
+                    )
+                    state_changed = state_changed or profile_changed
 
-        if state_changed and self.on_state_updated:
-            try:
-                self.on_state_updated()
-            except Exception as e:
-                logger.warning("通知界面状态更新失败：%s", e)
+                if (
+                    may_mutate_live_state
+                    and not task.get("immediate_emotion_applied", False)
+                    and event_can_mutate_state
+                ):
+                    self.emotion = update_emotion(self.emotion, event)
+                    save_emotion(self.emotion)
+                    state_changed = True
 
-        summary_started_at = time.perf_counter()
-        summarized = summarize_pending_if_ready(
-            self.config['api_key'],
-            self.config['model'],
-            self.config.get("base_url"),
-        )
-        logger.info(
-            "[PERF] postprocess_turn profile=%.3fs event=%.3fs "
-            "summary_check=%.3fs summarized=%s total=%.3fs",
-            profile_duration,
-            event_duration,
-            time.perf_counter() - summary_started_at,
-            summarized,
-            time.perf_counter() - started_at,
-        )
+                if not router_reply:
+                    save_event(event)
+                    if may_mutate_live_state and event_can_mutate_state:
+                        relationship_before = copy.deepcopy(self.relationship)
+                        self.relationship = update_relationship(self.relationship, event)
+                        save_relationship(self.relationship)
+                        state_changed = state_changed or self.relationship != relationship_before
+
+                if may_mutate_live_state:
+                    self.context.update(self.emotion, self.profile, self.relationship)
+
+            if not may_mutate_live_state:
+                logger.info("旧轮次后处理仅保存事实，已跳过实时状态写入 turn_id=%s", turn_id)
+
+            if state_changed and self.on_state_updated:
+                try:
+                    self.on_state_updated()
+                except Exception as e:
+                    logger.warning("通知界面状态更新失败：%s", e)
+
+            summary_started_at = time.perf_counter()
+            summarized = summarize_pending_if_ready(
+                self.config['api_key'],
+                self.config['model'],
+                self.config.get("base_url"),
+            )
+            logger.info(
+                "[PERF] postprocess_turn turn_id=%s current=%s profile=%.3fs event=%.3fs "
+                "summary_check=%.3fs summarized=%s total=%.3fs",
+                turn_id,
+                may_mutate_live_state,
+                profile_duration,
+                event_duration,
+                time.perf_counter() - summary_started_at,
+                summarized,
+                time.perf_counter() - started_at,
+            )
 
     def shutdown(self):
         if self._postprocess_accepting:
             self._postprocess_accepting = False
             self.on_state_updated = None
             self._postprocess_queue.put(None)
-        self._postprocess_thread.join(timeout=2)
+        self._postprocess_task.cancel()
+        self._postprocess_task.join(timeout=2)
+        if self._owns_task_supervisor:
+            self.task_supervisor.shutdown(timeout=2)
